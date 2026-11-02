@@ -1,7 +1,7 @@
-import { HoverParent, HoverPopover, ItemView, Keymap, Menu, MenuItem, Notice, Platform, setIcon, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { HoverParent, HoverPopover, ItemView, Keymap, Menu, MenuItem, Notice, Platform, setIcon, setTooltip, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import type FlatExplorerPlugin from "./FlatExplorerPlugin";
 import { compareEntries, reorderPaths, SORT_LABELS } from "./explorer_preferences";
-import { asNativeExplorer, findDisplayMenuItem, NativeExplorer, retainCreationItems } from "./native_explorer";
+import { findNativeExplorer, loadNativeExplorer, findDisplayMenuItem, NativeExplorer, retainCreationItems } from "./native_explorer";
 import { getFileIcon } from "./file_icons";
 import { TouchContextMenu } from "./TouchContextMenu";
 import { TouchFileDrag } from "./TouchFileDrag";
@@ -26,6 +26,7 @@ touchDrop: TouchDropTarget | null，目前通過驗證的放置目標。
 dragPreview: HTMLElement | null，跟隨手指的檔名與動作預覽。
 movingFile: boolean，是否正在由宿主搬移實體檔案，期間不接受新拖曳。
 touchSource: TAbstractFile | null，原始拖曳物件身分，避免刪除後同路徑重建被誤搬移。
+nativeLoading: Promise<void> | null，合併原生面板的非同步恢復，避免重複建立。
 rowFiles: WeakMap<HTMLElement, TAbstractFile>，列對應的原始物件身分，拒絕拖曳期間已變更的列。
 
 constructor(leaf: WorkspaceLeaf，宿主面板；plugin: FlatExplorerPlugin，偏好協作者)：建立視圖。
@@ -33,15 +34,16 @@ getViewType()、getDisplayText()、getIcon()：無輸入；string，分別回傳
 onOpen()：無輸入；Promise<void>，行動端註冊長按，喚醒延遲載入的核心側欄，訂閱檔案與作用中文件事件並繪製。
 onClose()：無輸入；Promise<void>，清理預覽。
 refresh()：無輸入；void，驗證目錄並重繪；編輯或拖曳中延後至完成。
-nativeExplorer()：無輸入；NativeExplorer | null，取得可用核心檔案總管。
+nativeExplorer()：無輸入；NativeExplorer | null，掃描可用核心檔案總管。
+ensureNativeContext()：無輸入；Promise<void>，延遲載入或補建已啟用的核心面板並重繪；失敗保留主題提示降級。
 sortOrder()：無輸入；string，解析偏好或目前原生排序。
 navigate(folder: TFolder，目的目錄)：void，切換目錄並重設隱藏項目暫顯狀態。
 render()：無輸入；void，繪製頂部工具列、標題分隔線與排序後直屬項目。
 createToolbarButton(parent: HTMLElement，按鈕列；label: string，無障礙名稱；icon: string，圖示識別)：HTMLElement，建立與原生同樣尺寸的導覽操作元素，補齊 Enter／Space 操作。
 renderRow(parent: HTMLElement，父容器；file: TAbstractFile，項目；isPath: boolean，路徑列)：void，建立含類型圖示與置頂圖示的平面列，綁定滑鼠、鍵盤、選單、hover 回呼。
 createNativeContext()：無輸入；NativeExplorer | null，建立隔離選取狀態、重新命名與建立後流程的原生代理。
-showContext(event: MouseEvent，位置；file: TAbstractFile，目標)：void，借用原生選單並追加自訂項；缺少內部 API 時提示。
-showBackgroundContext(event: MouseEvent，空白區位置)：void，沿用當前目錄的原生新增分區，包含啟用中的核心外掛新增項目；原生不可用時提示。
+showContext(event: MouseEvent，位置；file: TAbstractFile，目標)：Promise<void>，借用原生選單並追加自訂項；缺少內部 API 時提示。
+showBackgroundContext(event: MouseEvent，空白區位置)：Promise<void>，沿用當前目錄的原生新增分區，包含啟用中的核心外掛新增項目；原生不可用時提示。
 addMenuItems(menu: Menu，宿主選單；file: TAbstractFile，目標)：void，追加 pin/unpin、hide/unhide，根目錄除外。
 addMoveMenuItems(menu: Menu，宿主選單；file: TAbstractFile，目標)：void，行動端手動模式提供同分組上移／下移。
 getMoveTarget(file: TAbstractFile，目標；direction: number，-1 上移、1 下移)：TAbstractFile | undefined，取得可見同層且同置頂分組的相鄰項目。
@@ -76,6 +78,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private dragPreview: HTMLElement | null = null;
 	private movingFile = false;
 	private touchSource: TAbstractFile | null = null;
+	private nativeLoading: Promise<void> | null = null;
 	private rowFiles = new WeakMap<HTMLElement, TAbstractFile>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlatExplorerPlugin) {
@@ -128,10 +131,11 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		this.registerEvent(this.app.workspace.on("file-open", () => this.refresh()));
 		this.registerInterval(window.setInterval(() => {
 			const order = this.sortOrder();
-			if (order !== this.lastNativeSort)
+			if (order !== this.lastNativeSort || this.nativeExplorer() !== (this.nativeContext ? Object.getPrototypeOf(this.nativeContext) : null))
 				this.refresh();
 		}, 1000));
 		this.render();
+		this.app.workspace.onLayoutReady(() => void this.ensureNativeContext());
 	}
 
 	async onClose(): Promise<void> {
@@ -157,8 +161,19 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	}
 
 	private nativeExplorer(): NativeExplorer | null {
-		// 核心檔案總管須已啟用且建立面板，才有可借用的處理器。
-		return asNativeExplorer(this.app.workspace.getLeavesOfType("file-explorer")[0]?.view as ItemView | undefined);
+		// 不依賴面板順序或目前是否顯示。
+		return findNativeExplorer(this.app);
+	}
+
+	private async ensureNativeContext(): Promise<void> {
+		if (this.nativeLoading)
+			return this.nativeLoading;
+
+		// 載入完成才重建列映射，移除先前的降級提示與事件處理器。
+		this.nativeLoading = loadNativeExplorer(this.app).then(() => this.refresh()).catch((error) => {
+			console.error("FlatExplorer: 原生面板載入失敗", error);
+		}).finally(() => this.nativeLoading = null);
+		return this.nativeLoading;
 	}
 
 	private sortOrder(): string {
@@ -216,13 +231,14 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 		// 步驟 3：兩區標題與分隔線同行，所有項目保持平面對齊。
 		const sections = this.contentEl.createDiv("nav-files-container flat-explorer-sections");
-		const pathSection = sections.createEl("nav", { cls: "flat-explorer-path", attr: { "aria-label": "路徑" } });
-		pathSection.createEl("h3", { text: "路徑", cls: "flat-explorer-heading" });
+		const headingId = `flat-explorer-${Math.random().toString(36).slice(2)}`;
+		const pathSection = sections.createEl("nav", { cls: "flat-explorer-path", attr: { "aria-labelledby": `${headingId}-path` } });
+		pathSection.createEl("h3", { text: "路徑", cls: "flat-explorer-heading", attr: { id: `${headingId}-path` } });
 		for (const item of ancestors)
 			this.renderRow(pathSection, item, true);
 
-		const contents = sections.createEl("section", { cls: "flat-explorer-contents", attr: { "aria-label": "當前目錄" } });
-		contents.createEl("h3", { text: "當前目錄", cls: "flat-explorer-heading" });
+		const contents = sections.createEl("section", { cls: "flat-explorer-contents", attr: { "aria-labelledby": `${headingId}-contents` } });
+		contents.createEl("h3", { text: "當前目錄", cls: "flat-explorer-heading", attr: { id: `${headingId}-contents` } });
 
 		// 步驟 4：過濾隱藏項，套用置頂與排序；preferences 沿用既有契約。
 		const preferences = { ...this.plugin.preferences, sortOrder: this.lastNativeSort };
@@ -239,6 +255,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		// 原生導覽動作使用 div，避免 button 的字型與高度規則改變實際點擊範圍。
 		const button = parent.createDiv({ cls: "clickable-icon nav-action-button", attr: { role: "button", tabindex: "0", "aria-label": label } });
 		setIcon(button, icon);
+		setTooltip(button, label);
 		button.addEventListener("keydown", (event) => {
 			if (event.key === "Enter" || event.key === " ") {
 				event.preventDefault();
@@ -338,14 +355,18 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 				getTitle: () => label,
 				isFullTitleShown: () => title.scrollWidth <= title.clientWidth
 			};
+		}
+		if (native?.onFilePointerover && native.onFilePointerout) {
 			row.addEventListener("pointerover", (event) => {
 				if (!this.draggedPath && event.pointerType !== "touch")
-					native.onFilePointerover(event, row);
+					native.onFilePointerover?.(event, row);
 			});
-			row.addEventListener("pointerout", (event) => native.onFilePointerout(event, row));
+			row.addEventListener("pointerout", (event) => native.onFilePointerout?.(event, row));
 		}
 		else {
-			row.title = file.path;
+			// 公開 tooltip API 沿用主題樣式，不使用瀏覽器原生 title 方框。
+			const info = file instanceof TFolder ? `${file.children.filter((child) => child instanceof TFile).length} 個檔案, ${file.children.filter((child) => child instanceof TFolder).length} 個資料夾` : file.path;
+			setTooltip(row, info, { placement: "right" });
 			row.addEventListener("mouseover", (event) => {
 				if (file instanceof TFile)
 					this.app.workspace.trigger("hover-link", { event, source: VIEW_TYPE, hoverParent: this, targetEl: row, linktext: file.path });
@@ -380,12 +401,15 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		return context;
 	}
 
-	private showContext(event: MouseEvent, file: TAbstractFile): void {
+	private async showContext(event: MouseEvent, file: TAbstractFile): Promise<void> {
 		event.preventDefault();
 		event.stopPropagation();
+		if (!this.nativeContext)
+			await this.ensureNativeContext();
+
 		const native = this.nativeContext;
 		if (!native) {
-			new Notice("完整原生選單需要啟用核心「檔案列表」；此版本若不相容請回報。");
+			new Notice("FlatExplorer：無法載入核心檔案列表的選單處理器，請重新載入套件。");
 			const menu = new Menu();
 			this.addMenuItems(menu, file);
 			menu.showAtMouseEvent(event);
@@ -467,13 +491,16 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		return target && this.canReorder(file.path, target) ? target : undefined;
 	}
 
-	private showBackgroundContext(event: MouseEvent): void {
+	private async showBackgroundContext(event: MouseEvent): Promise<void> {
 		event.preventDefault();
 		event.stopPropagation();
+		if (!this.nativeContext)
+			await this.ensureNativeContext();
+
 		const native = this.nativeContext;
 		const folder = this.currentFolder;
 		if (!native || !folder) {
-			new Notice("原生新增選單需要啟用核心「檔案列表」並保留其面板。");
+			new Notice("FlatExplorer：無法載入核心檔案列表的新增選單，請重新載入套件。");
 			return;
 		}
 

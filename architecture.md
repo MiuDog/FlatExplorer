@@ -9,6 +9,7 @@
 | FlatExplorerPlugin | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 註冊入口、載入偏好、序列化保存與同步路徑。 |
 | FlatExplorerView | [src/FlatExplorerView.ts](src/FlatExplorerView.ts) | 平面兩區、導覽、排序、項目與空白選單、hover、就地改名。 |
 | ExplorerPreferences | [src/explorer_preferences.ts](src/explorer_preferences.ts) | pinned／hidden／manualOrder 路徑陣列及 sortOrder 代碼。 |
+| ExplorerHost | [src/native_explorer.ts](src/native_explorer.ts) | App 的核心啟用狀態相容契約。 |
 | NativeExplorer | [src/native_explorer.ts](src/native_explorer.ts) | 核心內部檔案總管介面，繼承 ItemView、HoverParent。 |
 | NativeRow | [src/native_explorer.ts](src/native_explorer.ts) | 本面板列的選單定位與 tooltip 文字資訊。 |
 | NativeTree | [src/native_explorer.ts](src/native_explorer.ts) | 空多選集合及不改原生焦點的介面。 |
@@ -254,7 +255,7 @@ flowchart TD
 	Native -->|否| Fallback[提示並顯示自訂選單；hover 改用公開 hover-link]
 ```
 
-asNativeExplorer 驗證三個必要原生處理器。createNativeContext 使用 Object.create 借用處理器；files 為 WeakMap、fileItems 為路徑到 NativeRow 的索引，tree 的 selectedDoms 為空集合、setFocusedItem 為空回呼。hoverPopover 歸該代理所有，重繪時卸載。afterCreate 回呼開啟新檔案，或回到新資料夾的父層後啟動改名；startRenameFile 改接本面板。
+asNativeExplorer 僅驗證選單處理器，hover 方法各自檢查，避免其中一項差異讓整組失效。findNativeExplorer 掃描全部原生面板；loadNativeExplorer 先喚醒延遲面板，核心已啟用但沒有面板時，在左側建立非作用中的原生頁籤（不建立新分割、不 reveal、不搶焦點）。ensureNativeContext 合併非同步載入，在 layout-ready 與選單缺少代理時恢復並重繪；既有輪詢也在原生實例變更時更新。createNativeContext 使用 Object.create 借用處理器；files 為 WeakMap、fileItems 為路徑到 NativeRow 的索引，tree 的 selectedDoms 為空集合、setFocusedItem 為空回呼。hoverPopover 歸該代理所有，重繪時卸載。afterCreate 回呼開啟新檔案，或回到新資料夾的父層後啟動改名；startRenameFile 改接本面板。
 
 showContext 的臨時 file-menu 回呼只接受同一目標檔案；try/finally 保證解除訂閱。findDisplayMenuItem 只辨識 Pin／Unpin、Pin File／Unpin File、Pin Folder／Unpin Folder、Hide／Hide File／Hide Folder 等確切標題，在這次選單中替換對應回呼，防止 File Explorer Plus 產生重複項目；其他項目保留。Pin 與 Hide 均用於檔案與資料夾，根目錄不提供顯示控制。資料夾在置頂群組中仍適用一般排序或手動排序，圖示切換共用原有 CSS。
 
@@ -362,3 +363,27 @@ flowchart LR
 目前推薦 BRAT：公開 Release 已提供其所需的三個單獨資產，manifest.isDesktopOnly=false。BRAT 可接受 MiuDog/FlatExplorer 或完整 GitHub 儲存庫 URL。平台 ZIP 為 flat-explorer-android.zip、flat-explorer-ipados.zip、flat-explorer-ios.zip，各自包含同一個 flat-explorer/ 三檔資料夾，另於 ZIP 根目錄附 install-android.md、install-ipados.md 或 install-ios.md。三份指南也作為 Release 獨立附件，與現有 0.6.0 發行版並存，不變更已發布標籤與主程式。
 
 平台文件依 BRAT、Obsidian 官方文件於 2026-11-02 查證；下載資產驗證格式與雜湊，不宣稱 Android／iPadOS／iOS 實機安裝已測試。指南中 iOS／iPadOS 以 BRAT 為主、電腦同步為備用，不假設系統「檔案」App 可直接操作 Vault 的隱藏資料夾。
+
+
+### 啟動恢復與主題提示
+
+```mermaid
+flowchart TD
+	Layout[onLayoutReady / 缺少代理的 showContext 或 showBackgroundContext] --> Ensure[ensureNativeContext 合併載入]
+	Ensure --> Load[loadNativeExplorer]
+	Load --> Wake[loadIfDeferred 喚醒全部原生面板]
+	Wake --> Find[findNativeExplorer 掃描可用選單]
+	Find --> Missing{沒有實例且核心啟用}
+	Missing -->|是| Create[getLeftLeaf false → setViewState active false → loadIfDeferred]
+	Missing -->|否| Return[回傳既有實例或 null]
+	Create --> Return
+	Return --> Refresh[refresh → render → createNativeContext → renderRow]
+	Refresh --> Hover{兩個 hover 方法可用}
+	Hover -->|是| Native[原生主題 tooltip：修改與建立時間／資料夾計數]
+	Hover -->|否| Theme[setTooltip 主題提示 + 公開 hover-link]
+	Toolbar[createToolbarButton] --> Theme
+```
+
+區段使用 aria-labelledby 指向各自標題（render 產生每次唯一的 headingId），避免全域 aria-label 提示覆蓋原生檔案 tooltip；保留可及性名稱。所有降級列移除瀏覽器 title 屬性；工具列也使用公開 setTooltip。原生 hover 和右鍵選單分別判定相容性。載入錯誤記錄於 console 並保留降級互動，不再誤報使用者未啟用核心。
+
+新增 tests/native_explorer.test.mjs 驗證方法相容性、跨面板掃描、延遲載入、無面板補建、停用核心不建立，以及補建不分割與不搶焦點。

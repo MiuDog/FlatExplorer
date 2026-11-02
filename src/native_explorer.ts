@@ -1,4 +1,4 @@
-import { HoverParent, ItemView, Menu, MenuItem, TAbstractFile } from "obsidian";
+import { App, HoverParent, ItemView, Menu, MenuItem, TAbstractFile } from "obsidian";
 
 /*
 NativeExplorer：目前核心檔案總管的內部介面，集中於相容層。
@@ -21,8 +21,8 @@ export interface NativeExplorer extends ItemView, HoverParent {
 	fileItems: Record<string, NativeRow>;
 	tree: NativeTree;
 	onFileContextMenu(event: MouseEvent, file: TAbstractFile): void;
-	onFilePointerover(event: PointerEvent, row: HTMLElement): void;
-	onFilePointerout(event: PointerEvent, row: HTMLElement): void;
+	onFilePointerover?(event: PointerEvent, row: HTMLElement): void;
+	onFilePointerout?(event: PointerEvent, row: HTMLElement): void;
 	startRenameFile(file: TAbstractFile): Promise<void>;
 	afterCreate(file: TAbstractFile, newLeaf: boolean): Promise<void>;
 }
@@ -83,10 +83,54 @@ export function findDisplayMenuItem(menu: Menu, kind: "pin" | "hide"): MenuItem 
 }
 
 export function asNativeExplorer(view: ItemView | undefined): NativeExplorer | null {
-	// 內部 API 不保證跨版本，僅在方法齊全時啟用原生橋接。
+	// 選單與 hover 分別判定相容性，避免 tooltip 方法差異連帶停用選單。
 	const candidate = view as NativeExplorer | undefined;
-	if (!candidate || typeof candidate.onFileContextMenu !== "function" || typeof candidate.onFilePointerover !== "function" || typeof candidate.onFilePointerout !== "function")
+	if (!candidate || typeof candidate.onFileContextMenu !== "function")
 		return null;
 
 	return candidate;
+}
+
+/*
+ExplorerHost：核心啟用狀態的最小相容契約。
+
+internalPlugins.getPluginById(id: string，核心識別)：{ enabled: boolean } | undefined，取得是否可建立原生面板。
+繼承 App 的 workspace 與公開生命週期介面。
+
+*/
+interface ExplorerHost extends App {
+	internalPlugins: { getPluginById(id: string): { enabled: boolean } | undefined };
+}
+
+export function findNativeExplorer(app: App): NativeExplorer | null {
+	// 掃描全部面板，避免第一個延遲載入的面板遮蔽已可用的處理器。
+	for (const leaf of app.workspace.getLeavesOfType("file-explorer")) {
+		const native = asNativeExplorer(leaf.view as ItemView);
+		if (native)
+			return native;
+	}
+	return null;
+}
+
+export async function loadNativeExplorer(app: App): Promise<NativeExplorer | null> {
+	// 先喚醒既有核心面板；沒有面板時，只在核心已啟用的情況下補建。
+	const leaves = app.workspace.getLeavesOfType("file-explorer");
+	for (const leaf of leaves) {
+		if (typeof leaf.loadIfDeferred === "function")
+			await leaf.loadIfDeferred();
+	}
+	const existing = findNativeExplorer(app);
+	if (existing || leaves.length > 0 || !(app as ExplorerHost).internalPlugins?.getPluginById("file-explorer")?.enabled)
+		return existing;
+
+	const leaf = app.workspace.getLeftLeaf(false);
+	if (!leaf)
+		return null;
+
+	// 不啟用或 reveal 新面板，保留使用者目前的編輯與側欄焦點。
+	await leaf.setViewState({ type: "file-explorer", active: false });
+	if (typeof leaf.loadIfDeferred === "function")
+		await leaf.loadIfDeferred();
+
+	return findNativeExplorer(app);
 }
