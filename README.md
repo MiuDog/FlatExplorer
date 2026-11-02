@@ -4,6 +4,20 @@ Obsidian 平面檔案瀏覽套件。
 
 作者：[MiuDog](https://github.com/MiuDog) · [下載最新版本](https://github.com/MiuDog/FlatExplorer/releases/latest) · [回報問題](https://github.com/MiuDog/FlatExplorer/issues)
 
+## Android／iPad／iPhone 下載與安裝
+
+目前推薦在 Obsidian 透過 [BRAT](https://community.obsidian.md/plugins/obsidian42-brat) 加入 `MiuDog/FlatExplorer`，由 BRAT 下載與管理更新，不必手動操作隱藏設定資料夾。[開始安裝](docs/install/README.md)
+
+| 裝置 | 安裝指南 | 附指南的 ZIP 備用包 |
+| --- | --- | --- |
+| Android | [Android 安裝](docs/install/android.md) | [Android ZIP](https://github.com/MiuDog/FlatExplorer/releases/latest/download/flat-explorer-android.zip) |
+| iPad／iPadOS | [iPadOS 安裝](docs/install/ipados.md) | [iPadOS ZIP](https://github.com/MiuDog/FlatExplorer/releases/latest/download/flat-explorer-ipados.zip) |
+| iPhone／iOS | [iOS 安裝](docs/install/ios.md) | [iOS ZIP](https://github.com/MiuDog/FlatExplorer/releases/latest/download/flat-explorer-ios.zip) |
+
+三個平台使用相同主程式，ZIP 差別僅為附帶指南；手機上優先選 BRAT。iPad／iPhone 下載 ZIP 不會自動安裝，也可從已安裝的電腦透過既有 [Obsidian Sync](docs/install/sync.md) 同步。
+
+## 功能
+
 目前版本：0.6.0，新增行動裝置觸控操作。
 
 - 上方依序列出 Vault 根目錄到當前目錄，點擊可返回任一祖先目錄。
@@ -42,7 +56,7 @@ Obsidian 平面檔案瀏覽套件。
 
 直接安裝：從 [GitHub Releases](https://github.com/MiuDog/FlatExplorer/releases) 下載 `flat-explorer.zip`，解壓縮後將整個 `flat-explorer` 資料夾放入 Vault 的 `.obsidian/plugins/`。重新啟動 Obsidian，在「設定 → 社群外掛 → 已安裝的外掛」啟用 FlatExplorer。
 
-儲存庫發布與 Obsidian 社群目錄上架是不同流程；目前提供 GitHub Release 手動安裝。
+儲存庫發布與 Obsidian 社群目錄上架是不同流程；目前提供 BRAT 與 GitHub Release 手動安裝。
 
 需要 Node.js 與 npm。在專案目錄執行：
 

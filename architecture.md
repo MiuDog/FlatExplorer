@@ -294,3 +294,11 @@ data.json 使用 ExplorerPreferences 契約；package-lock.json 為 npm 依賴�
 ## GitHub 發布
 
 公開儲存庫為 MiuDog/FlatExplorer，Release 標籤與 manifest.version 一致，使用 0.6.0。發行附件為 main.js、manifest.json、styles.css 與含 flat-explorer 資料夾的 flat-explorer.zip。main.js／dist／node_modules／.qa 由 .gitignore 排除，不將本機測試資料、Vault 偏好、截圖或依賴套件提交到原始碼儲存庫。
+
+## 行動裝置下載文件與發行附件
+
+[安裝入口](docs/install/README.md) 連結 [Android](docs/install/android.md)、[iPadOS](docs/install/ipados.md)、[iOS](docs/install/ios.md)、[Sync](docs/install/sync.md) 與 [更新復原](docs/install/updates.md) 文件。這些是安裝文件，沒有新增執行期類別或函式。
+
+目前推薦 BRAT：公開 Release 已提供其所需的三個單獨資產，manifest.isDesktopOnly=false。BRAT 可接受 MiuDog/FlatExplorer 或完整 GitHub 儲存庫 URL。平台 ZIP 為 flat-explorer-android.zip、flat-explorer-ipados.zip、flat-explorer-ios.zip，各自包含同一個 flat-explorer/ 三檔資料夾，另於 ZIP 根目錄附 install-android.md、install-ipados.md 或 install-ios.md。三份指南也作為 Release 獨立附件，與現有 0.6.0 發行版並存，不變更已發布標籤與主程式。
+
+平台文件依 BRAT、Obsidian 官方文件於 2026-11-02 查證；下載資產驗證格式與雜湊，不宣稱 Android／iPadOS／iOS 實機安裝已測試。指南中 iOS／iPadOS 以 BRAT 為主、電腦同步為備用，不假設系統「檔案」App 可直接操作 Vault 的隱藏資料夾。
