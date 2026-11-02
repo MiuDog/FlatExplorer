@@ -4,6 +4,8 @@ import { compareEntries, reorderPaths, SORT_LABELS } from "./explorer_preference
 import { asNativeExplorer, findDisplayMenuItem, NativeExplorer, retainCreationItems } from "./native_explorer";
 import { getFileIcon } from "./file_icons";
 import { TouchContextMenu } from "./TouchContextMenu";
+import { TouchFileDrag } from "./TouchFileDrag";
+import { getMovePath, getTouchDropKind, TouchDragHandlers, TouchDropTarget } from "./touch_drag";
 
 export const VIEW_TYPE = "flat-explorer-view";
 
@@ -19,6 +21,12 @@ editing: boolean，重新命名期間避免重繪拆除輸入欄。
 lastNativeSort: string，輪詢時只在原生排序改變時重繪。
 draggedPath: string | null，本面板正在拖曳的直屬項目；不接受外部檔案拖放。
 touchMenus: TouchContextMenu | null，行動裝置長按事件管理器，由子元件生命週期清理。
+touchDrag: TouchFileDrag | null，物件長按拖曳管理器。
+touchDrop: TouchDropTarget | null，目前通過驗證的放置目標。
+dragPreview: HTMLElement | null，跟隨手指的檔名與動作預覽。
+movingFile: boolean，是否正在由宿主搬移實體檔案，期間不接受新拖曳。
+touchSource: TAbstractFile | null，原始拖曳物件身分，避免刪除後同路徑重建被誤搬移。
+rowFiles: WeakMap<HTMLElement, TAbstractFile>，列對應的原始物件身分，拒絕拖曳期間已變更的列。
 
 constructor(leaf: WorkspaceLeaf，宿主面板；plugin: FlatExplorerPlugin，偏好協作者)：建立視圖。
 getViewType()、getDisplayText()、getIcon()：無輸入；string，分別回傳識別、名稱、圖示。
@@ -42,6 +50,9 @@ bindManualDragging(row: HTMLElement，目標列；file: TAbstractFile，直屬�
 canReorder(source: string，來源路徑；target: TAbstractFile，目的項目)：boolean，檢查手動模式、直屬同層與置頂分組，不接受外來項目。
 moveEntry(source: string，來源路徑；target: TAbstractFile，目的項目；after: boolean，是否插入其後)：void，保存包含隱藏項的目錄順序，其他目錄順序不受影響。
 clearDragIndicators(clearSource: boolean = true，是否一併清除來源外觀)：void，移除插入線，結束拖曳時也清除來源狀態。
+startTouchDrag(row: HTMLElement，來源列；x: number，水平 CSS px；y: number，垂直 CSS px)：boolean，啟動來源預覽與落點判斷。
+updateTouchDrag(x: number，水平 CSS px；y: number，垂直 CSS px)：void，依位置判斷排序或搬移，驗證後高亮並更新預覽。
+finishTouchDrag(cancelled: boolean，是否取消)：Promise<void>，重驗放置目標並保存排序或透過 FileManager 搬移；衝突或錯誤通知且不覆寫。
 renameFile(file: TAbstractFile，目標)：Promise<void>，在平面列編輯；Enter 或失焦提交、Escape 取消；失敗通知。
 openFile(file: TFile，目的檔案；newLeaf: boolean，是否新分頁)：Promise<void>，宿主開啟，行動端收起側欄，失敗通知。
 
@@ -59,6 +70,12 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private lastNativeSort = "";
 	private draggedPath: string | null = null;
 	private touchMenus: TouchContextMenu | null = null;
+	private touchDrag: TouchFileDrag | null = null;
+	private touchDrop: TouchDropTarget | null = null;
+	private dragPreview: HTMLElement | null = null;
+	private movingFile = false;
+	private touchSource: TAbstractFile | null = null;
+	private rowFiles = new WeakMap<HTMLElement, TAbstractFile>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: FlatExplorerPlugin) {
 		super(leaf);
@@ -83,6 +100,15 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		if (Platform.isMobile) {
 			this.touchMenus = new TouchContextMenu(this.contentEl);
 			this.addChild(this.touchMenus);
+
+			// TouchDragHandlers 將手勢與資料操作分開，預覽期間不修改 Vault。
+			const handlers: TouchDragHandlers = {
+				start: (row, x, y) => this.startTouchDrag(row, x, y),
+				move: (x, y) => this.updateTouchDrag(x, y),
+				finish: (cancelled) => void this.finishTouchDrag(cancelled)
+			};
+			this.touchDrag = new TouchFileDrag(this.contentEl, handlers);
+			this.addChild(this.touchDrag);
 		}
 
 		for (const nativeLeaf of this.app.workspace.getLeavesOfType("file-explorer")) {
@@ -111,12 +137,14 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		// 關閉面板時一併清理預覽浮窗。
 		this.draggedPath = null;
 		this.touchMenus?.cancel();
+		this.touchDrag?.cancel();
+		this.dragPreview?.remove();
 		this.hoverPopover?.unload();
 		this.nativeContext?.hoverPopover?.unload();
 	}
 
 	refresh(): void {
-		if (this.editing || this.draggedPath)
+		if (this.editing || this.draggedPath || this.movingFile)
 			return;
 
 		// 祖先改名後仍保留物件身分；刪除後回到根目錄。
@@ -150,8 +178,10 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 		// 步驟 1：清理舊浮窗與 DOM，建立本輪列的原生映射。
 		this.touchMenus?.cancel();
+		this.touchDrag?.cancel();
 		this.nativeContext?.hoverPopover?.unload();
 		this.contentEl.empty();
+		this.rowFiles = new WeakMap();
 		this.contentEl.removeClass("nav-files-container");
 		this.contentEl.addClass("flat-explorer");
 		this.nativeContext = this.createNativeContext();
@@ -224,6 +254,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		const wrapper = parent.createDiv(isFolder ? "nav-folder tree-item" : "nav-file tree-item");
 		const row = wrapper.createDiv(isFolder ? "nav-folder-title tree-item-self flat-explorer-row" : "nav-file-title tree-item-self flat-explorer-row");
 		row.dataset.path = file.path;
+		this.rowFiles.set(row, file);
 		row.tabIndex = 0;
 		row.setAttribute("role", "button");
 
@@ -461,7 +492,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		// 使用宿主 Menu，維持與參考截圖一致的選單外觀。
 		const menu = new Menu();
 		for (const [order, label] of Object.entries(SORT_LABELS)) {
-			const title = Platform.isMobile && order === "manual" ? "手動排序（選單上移／下移）" : label;
+			const title = Platform.isMobile && order === "manual" ? "手動排序（長按拖曳／選單調整）" : label;
 			menu.addItem((item) => item.setTitle(title).setChecked(this.plugin.preferences.sortOrder === order).onClick(() => {
 				// 首次進入手動模式時記住此目錄完整順序；切換回來則沿用已保存的編排。
 				const folder = this.currentFolder;
@@ -559,9 +590,119 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 	private clearDragIndicators(clearSource = true): void {
 		for (const row of Array.from(this.contentEl.querySelectorAll(".flat-explorer-row"))) {
-			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after");
+			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after", "flat-explorer-drop-into");
 			if (clearSource)
 				row.removeClass("is-dragging");
+		}
+	}
+
+	private startTouchDrag(row: HTMLElement, x: number, y: number): boolean {
+		if (this.editing || this.movingFile || this.draggedPath)
+			return false;
+
+		const source = this.currentFolder?.children.find((file) => file.path === row.dataset.path);
+		if (!source || source !== this.rowFiles.get(row))
+			return false;
+
+		// 提供來源與動作預覽；固定定位不攔截 elementFromPoint 的落點偵測。
+		this.draggedPath = source.path;
+		this.touchSource = source;
+		row.addClass("is-dragging");
+		this.dragPreview = this.contentEl.doc.body.createDiv({ cls: "flat-explorer-drag-preview", attr: { "aria-hidden": "true" } });
+		this.dragPreview.createDiv({ cls: "flat-explorer-drag-name", text: source.name });
+		this.dragPreview.createDiv({ cls: "flat-explorer-drag-action", text: "拖至資料夾以移動" });
+		this.updateTouchDrag(x, y);
+		return true;
+	}
+
+	private updateTouchDrag(x: number, y: number): void {
+		this.clearDragIndicators(false);
+		this.touchDrop = null;
+		const candidate = this.draggedPath ? this.app.vault.getAbstractFileByPath(this.draggedPath) : null;
+		const source = candidate === this.touchSource ? candidate : null;
+		const element = this.contentEl.doc.elementFromPoint(x, y);
+		const row = element?.closest<HTMLElement>(".flat-explorer-row");
+		let description = "拖至資料夾以移動";
+		if (source && row && this.contentEl.contains(row)) {
+			const target = this.rowFiles.get(row);
+			if (target && target !== source && target.path === row.dataset.path && this.app.vault.getAbstractFileByPath(target.path) === target) {
+				const rect = row.getBoundingClientRect();
+				const isPath = !!row.closest(".flat-explorer-path");
+				const ratio = rect.height > 0 ? (y - rect.top) / rect.height : 0.5;
+				const kind = getTouchDropKind(target instanceof TFolder, ratio, !isPath && this.sortOrder() === "manual");
+				if (kind === "move" && target instanceof TFolder) {
+					const path = getMovePath(source, target);
+					if (path && !this.app.vault.getAbstractFileByPath(path)) {
+						this.touchDrop = { kind: "move", target, row, after: false };
+						row.addClass("flat-explorer-drop-into");
+						description = `移動至：${target.isRoot() ? this.app.vault.getName() : target.name}`;
+					}
+					else
+						description = path ? "目標已有同名項目，不能放置" : "不能移入原位置、自身或子孫資料夾";
+				}
+				else if (kind === "before" || kind === "after") {
+					if (this.canReorder(source.path, target)) {
+						this.touchDrop = { kind: "reorder", target, row, after: kind === "after" };
+						row.addClass(kind === "after" ? "flat-explorer-drop-after" : "flat-explorer-drop-before");
+						description = `排序：放在「${target.name}」${kind === "after" ? "之後" : "之前"}`;
+					}
+					else
+						description = "不能跨置頂群組調整順序";
+				}
+				else
+					description = "此排序模式請拖至資料夾以移動";
+			}
+		}
+
+		// 依有效操作更新文字，並將預覽限制在視窗內。
+		const preview = this.dragPreview;
+		if (preview) {
+			preview.querySelector(".flat-explorer-drag-action")?.setText(description);
+			preview.style.left = `${Math.max(8, Math.min(x + 16, this.contentEl.win.innerWidth - preview.offsetWidth - 8))}px`;
+			preview.style.top = `${Math.max(8, Math.min(y + 20, this.contentEl.win.innerHeight - preview.offsetHeight - 8))}px`;
+		}
+	}
+
+	private async finishTouchDrag(cancelled: boolean): Promise<void> {
+		const sourcePath = this.draggedPath;
+		const expectedSource = this.touchSource;
+		const drop = this.touchDrop;
+		this.draggedPath = null;
+		this.touchSource = null;
+		this.touchDrop = null;
+		this.dragPreview?.remove();
+		this.dragPreview = null;
+		this.clearDragIndicators();
+		if (cancelled || !sourcePath || !drop) {
+			this.refresh();
+			return;
+		}
+
+		if (drop.kind === "reorder") {
+			this.moveEntry(sourcePath, drop.target, drop.after);
+			return;
+		}
+
+		// 放開時再次驗證來源、目的資料夾及同名衝突，避免拖曳期間的 Vault 變動造成誤操作。
+		const source = this.app.vault.getAbstractFileByPath(sourcePath);
+		const target = this.app.vault.getAbstractFileByPath(drop.target.path);
+		const destination = source === expectedSource && source && target === drop.target && target instanceof TFolder ? getMovePath(source, target) : null;
+		if (!source || !destination || this.app.vault.getAbstractFileByPath(destination)) {
+			new Notice("無法移動：來源或目標已變更，或目標已有同名項目。");
+			this.refresh();
+			return;
+		}
+
+		this.movingFile = true;
+		try {
+			await this.app.fileManager.renameFile(source, destination);
+		}
+		catch (error) {
+			new Notice(`移動失敗：${error instanceof Error ? error.message : String(error)}`);
+		}
+		finally {
+			this.movingFile = false;
+			this.refresh();
 		}
 	}
 

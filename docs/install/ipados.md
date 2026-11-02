@@ -7,7 +7,7 @@
 1. 在 iPad 開啟要使用的 Vault，到「設定 → 社群外掛 → 瀏覽」搜尋 **BRAT**，安裝並啟用。[BRAT 套件頁](https://community.obsidian.md/plugins/obsidian42-brat)
 2. 到 BRAT 設定，選 **Add beta plugin**，輸入 `MiuDog/FlatExplorer`。
 3. 選 **Latest version** 並確認安裝，再到已安裝外掛清單啟用 **FlatExplorer**。
-4. 從命令面板執行「FlatExplorer：開啟檔案瀏覽器」。觸控可點「⋯」或長按；手動排序從選單上移／下移。
+4. 從命令面板執行「FlatExplorer：開啟檔案瀏覽器」。點「⋯」開啟選單；物件長按拖曳。資料夾中央高亮表示移入，路徑區父層可將物件移出；手動模式的列前後邊緣以插入線表示排序位置。
 
 ## 備用方式：從電腦同步
 

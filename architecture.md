@@ -15,6 +15,9 @@
 | NativeMenu | [src/native_explorer.ts](src/native_explorer.ts) | items 為選單項目陣列，項目的可選 titleEl 用於辨識其他外掛的同名 Pin／Hide。 |
 | DailyNotesHost | [src/file_icons.ts](src/file_icons.ts) | 將每日筆記核心設定的讀取限定在圖示分類邊界，缺少該 API 時視為一般筆記。 |
 | TouchContextMenu | [src/TouchContextMenu.ts](src/TouchContextMenu.ts) | 管理行動端長按、捲動取消及點擊／選單去重，不控制檔案操作。 |
+| TouchFileDrag | [src/TouchFileDrag.ts](src/TouchFileDrag.ts) | 物件長按啟動、預覽移動、邊緣捲動及結束手勢。 |
+| TouchDragHandlers | [src/touch_drag.ts](src/touch_drag.ts) | start／move／finish 協作契約，隔離手勢與檔案操作。 |
+| TouchDropTarget | [src/touch_drag.ts](src/touch_drag.ts) | kind、target、row、after 記錄已驗證排序或搬移落點。 |
 
 ```mermaid
 classDiagram
@@ -31,6 +34,10 @@ classDiagram
 	FlatExplorerView ..> DailyNotesHost : getFileIcon 讀取每日筆記設定
 	Component <|-- TouchContextMenu
 	FlatExplorerView *-- TouchContextMenu : 行動端 addChild 生命週期
+	Component <|-- TouchFileDrag
+	FlatExplorerView *-- TouchFileDrag : 行動端物件拖曳
+	TouchFileDrag --> TouchDragHandlers : 手勢回呼
+	FlatExplorerView --> TouchDropTarget : 驗證後的落點
 	NativeExplorer --> NativeTree : 隔離多選與焦點
 	NativeExplorer --> NativeRow : 列索引
 	Workspace o-- FlatExplorerView : 管理生命週期
@@ -156,11 +163,46 @@ flowchart TD
 	Workspace --> Collapse[行動端 leftSplit.collapse]
 ```
 
-TouchContextMenu.constructor 註冊 root 與 root.doc 的事件；pointermove 回呼只處理同一觸點，scroll 採 capture，pointerup／pointercancel 取消尚未完成的長按。start 排除非主要 touch／pen 及 input／textarea／clickable-icon；計時回呼確認 isConnected，以 dispatching 區分自行送出的 contextmenu。click capture 阻止長按釋放造成導航；contextmenu capture 取消計時，並去除長按後的原生重複事件。cancel 清除 timer／target／pointerId；onunload 再清理計時器，Component 解除註冊事件。render 及 onClose 會取消未完成的手勢，避免舊 DOM 操作。
+TouchContextMenu.constructor 註冊 root 與 root.doc 的事件；pointermove 回呼只處理空白區觸點，scroll 採 capture，pointerup／pointercancel 取消尚未完成的長按。start 排除非主要 touch／pen 及 input／textarea／clickable-icon；物件列不啟動選單計時器，只記錄 objectPointerId 以抑制系統長按右鍵，釋放後延續 800ms；新滑鼠按下會清除物件觸控抑制。空白區計時回呼確認 isConnected，以 dispatching 區分自行送出的 contextmenu。click capture 阻止空白區長按釋放造成誤點；contextmenu capture 去除物件長按選單與空白區重複事件。cancel 清除 timer／target／pointerId；onunload 清理所有計時與物件觸控狀態，Component 解除事件。
 
 renderRow 在手機加入可鍵盤操作的更多按鈕，click 回呼停止冒泡；createToolbarButton 的 Enter／Space 也停止冒泡，避免同時導航。觸控 pointerover 不觸發桌面預覽；手機不註冊 HTML 拖曳。addMoveMenuItems 產生上移／下移項目，getMoveTarget 只接受直屬且同置頂分組的可見鄰項，沒有可用位置時禁用；操作時再次計算位置。hide／pin／manualOrder 與桌面共用，不另建資料格式。
 
 行動 CSS 將項目、工具列與更多按鈕的觸控範圍設為至少 44px，允許垂直 pan，停用文字長按選取；rename input 保留文字選取。手機原生 nav-header 預設置底，因此明確指定工具列 order=0、內容 order=1。置頂圖示不受觸控產生的黏著 hover 影響；桌面在 hover 媒體條件下沿用切換。執行來源僅匯入 obsidian，不使用 Node.js／Electron；manifest 的 isDesktopOnly=false。
+
+0.7.0 僅在 .is-mobile .flat-explorer 範圍，將檔案／資料夾列與更多按鈕圓角設為 --radius-s，避免行動原生 --nav-item-radius 的 30px 觸控圓角讓檔案列看似 dropdown。列的 padding-block 設為 0，避免內部 44px 更多按鈕加上上下留白撐高整列；列與更多按鈕的觸控範圍仍至少 44px。工具列、宿主的視圖切換 dropdown 與桌面列不受此範圍影響。
+
+## 行動長按拖曳與放置
+
+```mermaid
+flowchart TD
+	Down[TouchFileDrag.start：直屬物件主要 touch / pen] --> Wait[550ms 候選]
+	Wait -->|啟動前移動逾 10px 或捲動| Cancel[finish true 取消]
+	Wait --> Begin[startTouchDrag 建立來源與預覽]
+	Begin --> Move[TouchFileDrag.move → updateTouchDrag]
+	Move --> Hit[elementFromPoint 找同面板列]
+	Hit --> Kind[getTouchDropKind]
+	Kind -->|手動排序的列邊緣| Reorder[canReorder 檢查置頂分組與同層]
+	Kind -->|資料夾中央或路徑列| Into[getMovePath 檢查原地、自身與子孫]
+	Into --> Conflict{目的地已有同名項目}
+	Conflict -->|是| Reject[無落點，預覽原因]
+	Conflict -->|否| Highlight[資料夾高亮與移動預覽]
+	Reorder --> Line[插入線與排序預覽]
+	Move --> Scroll[autoScroll：邊緣 36px 每幀捲動 10px 並重算落點]
+	Highlight --> Up[pointerup 再更新最終落點]
+	Line --> Up
+	Up --> Finish[先清理手勢，再 finishTouchDrag]
+	Finish -->|reorder| Save[moveEntry 保存順序]
+	Finish -->|move| Validate[重新驗證來源、資料夾與衝突]
+	Validate --> Rename[fileManager.renameFile]
+	Rename -->|失敗| Notice[通知，不覆寫]
+	Rename --> Refresh[finally 清除 movingFile 並 refresh]
+```
+
+TouchFileDrag.constructor 註冊 pointerdown／doc pointermove／pointerup／pointercancel、scroll、非 passive touchmove 與 click capture。start 只接受直屬內容列，排除按鈕與輸入欄；move 在啟動前維持原生捲動，啟動後透過 handlers 更新落點。active touchmove 阻止捲動；autoScroll 使用 requestAnimationFrame，只有手指位於內容上下 36px 邊緣才捲動。finish 先清除 timer／frame／觸點與 dragging，再通知協作者，避免重繪遞迴；cancel 與 onunload 不提交操作。啟動後以 suppressUntil 抑制放開後的點擊。
+
+startTouchDrag 驗證目前直屬來源，設定 draggedPath、半透明來源與 body 中的非互動預覽；其圖層使用 --layer-dragged-item。updateTouchDrag 只接受本面板的列，以 getTouchDropKind 判斷區域：手動模式資料夾中間 50% 為移入、上下各 25% 為排序；檔案以前後半部排序；非手動模式只有資料夾接受搬移。路徑區資料夾整列都是搬移目標，故可移到父層或祖先。描述文字與高亮只在通過驗證時更新 touchDrop，無效落點顯示原因。
+
+getMovePath 拒絕根目錄來源、原地、自身與來源資料夾的真正後代，保留原檔名，根目錄目的地不加斜線前綴。rowFiles 記錄每列的原始物件身分，touchSource 保存拖曳來源；預覽及放置均核對 Vault 物件身分與列的路徑，避免刪除後同路徑重建造成誤搬。finishTouchDrag 重驗所有來源與目標，排序沿用 moveEntry，搬移使用公開 FileManager.renameFile 讓宿主處理連結更新；同名既有項目不覆寫。movingFile 在實際搬移期間延後重繪與阻止新拖曳；rename 事件仍同步 pinned／hidden／manualOrder。取消、無落點及完成都會移除預覽與所有插入／移入標記。
 
 ## 類型圖示與置頂 hover
 
@@ -269,6 +311,8 @@ parsePreferences 的 paths 回呼只保留唯一字串，無效排序回 native�
 
 [tests/file_icons.test.mjs](tests/file_icons.test.mjs) 以相同載入策略測試圖示分類；normalizePath 替身僅處理測試需要的尾斜線。file 函式建立含 path／name／basename／extension 的替身，dailyHost 建立 enabled／folder／format 設定替身。三個 test 回呼驗證類型區分、有效日期與精確目錄邊界、日期子目錄及 Vault 根目錄；Moment 使用實際日期解析實作。
 
+[tests/touch_drag.test.mjs](tests/touch_drag.test.mjs) 使用相同記憶體載入方式，folder 函式建立 path／name／parent／isRoot 替身。四個 test 回呼驗證落點中央與邊緣、非手動模式、子層／父層／根目錄路徑，以及自身與子孫保護和同名前綴邊界。
+
 本機 .qa 為忽略版本控制的實機驗證暫存區。0.2.0 已通過 15 項 Obsidian 1.14.5 檢查：核心與第三方選單保留、不重複顯示控制、置頂順序及圖示、設定保存、Hide／Unhide、原生 hover-link、改名啟動與 Escape 取消、資料夾無斜線。測試前後還原偏好，不改名或刪除使用者筆記。實際視覺已由原生面板與選單截圖檢查；行動版與舊版本尚未實測。
 
 0.3.0 重新通過上述 15 項檢查及七個單元案例。實機測量原生與本套件按鈕均為 28 × 24 CSS px、內距 4px 6px、圖示 16px，工具列頂端與內容頂端相同。離屏 DOM 另確認筆記／每日筆記／畫布圖示，並以 CDP 強制 :hover 驗證 pin 隱藏、原圖示顯示及非透明的主題背景。驗證後移除臨時 DOM。
@@ -279,13 +323,15 @@ parsePreferences 的 paths 回呼只保留唯一字串，無效排序回 native�
 
 0.6.0 通過十一個單元案例、十八項官方行動模擬檢查，以及桌面十二項新增／資料夾置頂與十六項手動排序回歸。行動檢查涵蓋長按、移動與捲動取消、誤點／選單去重、更多及新增入口、44px 點擊區域、不依賴 HTML 拖曳的上移保存、側欄收合及展開後實際可見。390 × 844 viewport 無水平溢出，工具列幾何位置在內容上方。側欄開關驗證等待原生動畫完成。依官方行動開發文件使用 app.emulateMobile，測試前保存編輯與版面，結束後還原桌面模式與工作區。Android／iOS 實機尚未驗證。
 
+0.7.0 通過十五個單元案例與四十八項行動模擬檢查。測試在唯一命名的臨時 Vault 子目錄建立筆記與資料夾，實際經 FileManager 搬移，驗證資料夾中央／路徑父層的搬移、資料夾與其後代、列邊緣排序、同名不覆寫、來源與目標同路徑重建保護、取消後無異動及觸控尺寸。確認有效資料夾高亮與跟隨手指的動作預覽已繪製，並檢查小圓角文件列截圖。測試結束只清理自己建立且身分與唯一路徑相符的臨時目錄，再還原偏好及版面；不移動使用者原有檔案。Android／iPadOS／iOS 實機尚未驗證。
+
 ## 設定檔欄位
 
 | 檔案 | 契約 |
 | --- | --- |
 | package.json | name／version／description 識別套件；author 為 MiuDog；repository.type／url 指向 GitHub Git 儲存庫；private 防止 npm 意外發佈；main 指定產物；type 指定工具 ESM；scripts.dev 監看、build 型別檢查與建置、test 執行 Node 測試；devDependencies 為 esbuild／obsidian／typescript。 |
 | manifest.json | id 安裝目錄與識別；name 顯示名稱；version 發行版；minAppVersion 為套件最低目標，完整內部 API 僅確認 1.14.5；description 用途；author 為 MiuDog，authorUrl 為作者 GitHub；isDesktopOnly=false 支援行動載入，已模擬驗證，實機待驗證。 |
-| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0 對應 1.5.0，與 manifest 契約一致。 |
+| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0 與 0.7.0 對應 1.5.0，與 manifest 契約一致。 |
 | tsconfig.json | compilerOptions.target／module／moduleResolution 編譯環境；lib ES／DOM 型別；strict／noImplicitReturns／noUncheckedIndexedAccess 檢查；isolatedModules 配合 esbuild；skipLibCheck 跳過依賴；include 限定 src。 |
 | esbuild options | entryPoints 入口；bundle 合併；external 排除宿主；format／target 產物格式；outfile 檔名；sourcemap 開發啟用。 |
 
@@ -293,7 +339,7 @@ data.json 使用 ExplorerPreferences 契約；package-lock.json 為 npm 依賴�
 
 ## GitHub 發布
 
-公開儲存庫為 MiuDog/FlatExplorer，Release 標籤與 manifest.version 一致，使用 0.6.0。發行附件為 main.js、manifest.json、styles.css 與含 flat-explorer 資料夾的 flat-explorer.zip。main.js／dist／node_modules／.qa 由 .gitignore 排除，不將本機測試資料、Vault 偏好、截圖或依賴套件提交到原始碼儲存庫。
+公開儲存庫為 MiuDog/FlatExplorer，Release 標籤與 manifest.version 一致，目前使用 0.7.0。發行附件為 main.js、manifest.json、styles.css 與含 flat-explorer 資料夾的 flat-explorer.zip。main.js／dist／node_modules／.qa 由 .gitignore 排除，不將本機測試資料、Vault 偏好、截圖或依賴套件提交到原始碼儲存庫。
 
 ## 行動裝置下載文件與發行附件
 

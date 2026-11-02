@@ -7,7 +7,7 @@
 1. 開啟目標 Vault，在「設定 → 社群外掛 → 瀏覽」搜尋 **BRAT**，安裝並啟用。[BRAT 套件頁](https://community.obsidian.md/plugins/obsidian42-brat)
 2. 在 BRAT 設定選 **Add beta plugin**，貼上 `MiuDog/FlatExplorer`。
 3. 選 **Latest version** 並確認安裝，再到已安裝外掛清單啟用 **FlatExplorer**。
-4. 從命令面板執行「FlatExplorer：開啟檔案瀏覽器」。點擊導航，長按或「⋯」開啟操作選單。
+4. 從命令面板執行「FlatExplorer：開啟檔案瀏覽器」。點擊導航，「⋯」開啟選單；長按拖曳，放到資料夾中央搬移、在手動模式放到列前後邊緣排序。路徑區父層也可接收搬移。
 
 ## 備用方式：直接使用 ZIP
 
