@@ -50,6 +50,7 @@ bindManualDragging(row: HTMLElement，目標列；file: TAbstractFile，直屬�
 canReorder(source: string，來源路徑；target: TAbstractFile，目的項目)：boolean，檢查手動模式、直屬同層與置頂分組，不接受外來項目。
 moveEntry(source: string，來源路徑；target: TAbstractFile，目的項目；after: boolean，是否插入其後)：void，保存包含隱藏項的目錄順序，其他目錄順序不受影響。
 clearDragIndicators(clearSource: boolean = true，是否一併清除來源外觀)：void，移除插入線，結束拖曳時也清除來源狀態。
+showInsertionLine(row: HTMLElement，參考列；after: boolean，是否插在後方)：void，保留列的落點標記，在外層容器顯示不受圓角裁切的獨立橫線。
 startTouchDrag(row: HTMLElement，來源列；x: number，水平 CSS px；y: number，垂直 CSS px)：boolean，啟動來源預覽與落點判斷。
 updateTouchDrag(x: number，水平 CSS px；y: number，垂直 CSS px)：void，依位置判斷排序或搬移，驗證後高亮並更新預覽。
 finishTouchDrag(cancelled: boolean，是否取消)：Promise<void>，重驗放置目標並保存排序或透過 FileManager 搬移；衝突或錯誤通知且不覆寫。
@@ -252,6 +253,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		// 使用原生類別與文字容器，沿用主題的字型、間距、選取與 hover 外觀。
 		const isFolder = file instanceof TFolder;
 		const wrapper = parent.createDiv(isFolder ? "nav-folder tree-item" : "nav-file tree-item");
+		wrapper.addClass("flat-explorer-item");
 		const row = wrapper.createDiv(isFolder ? "nav-folder-title tree-item-self flat-explorer-row" : "nav-file-title tree-item-self flat-explorer-row");
 		row.dataset.path = file.path;
 		this.rowFiles.set(row, file);
@@ -537,7 +539,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			this.clearDragIndicators(false);
 			const rect = row.getBoundingClientRect();
 			const after = event.clientY >= rect.top + rect.height / 2;
-			row.addClass(after ? "flat-explorer-drop-after" : "flat-explorer-drop-before");
+			this.showInsertionLine(row, after);
 			if (event.dataTransfer)
 				event.dataTransfer.dropEffect = "move";
 		});
@@ -546,6 +548,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 				return;
 
 			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after");
+			row.parentElement?.removeClass("flat-explorer-insert-before", "flat-explorer-insert-after");
 		});
 		row.addEventListener("drop", (event) => {
 			if (!this.draggedPath)
@@ -591,9 +594,18 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private clearDragIndicators(clearSource = true): void {
 		for (const row of Array.from(this.contentEl.querySelectorAll(".flat-explorer-row"))) {
 			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after", "flat-explorer-drop-into");
+			row.parentElement?.removeClass("flat-explorer-insert-before", "flat-explorer-insert-after");
 			if (clearSource)
 				row.removeClass("is-dragging");
 		}
+	}
+
+	private showInsertionLine(row: HTMLElement, after: boolean): void {
+		// 橫線繪製在圓角檔案列之外；列標記仍供落點與拖曳驗證使用。
+		row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after");
+		row.parentElement?.removeClass("flat-explorer-insert-before", "flat-explorer-insert-after");
+		row.addClass(after ? "flat-explorer-drop-after" : "flat-explorer-drop-before");
+		row.parentElement?.addClass(after ? "flat-explorer-insert-after" : "flat-explorer-insert-before");
 	}
 
 	private startTouchDrag(row: HTMLElement, x: number, y: number): boolean {
@@ -643,7 +655,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 				else if (kind === "before" || kind === "after") {
 					if (this.canReorder(source.path, target)) {
 						this.touchDrop = { kind: "reorder", target, row, after: kind === "after" };
-						row.addClass(kind === "after" ? "flat-explorer-drop-after" : "flat-explorer-drop-before");
+						this.showInsertionLine(row, kind === "after");
 						description = `排序：放在「${target.name}」${kind === "after" ? "之後" : "之前"}`;
 					}
 					else

@@ -331,7 +331,7 @@ parsePreferences 的 paths 回呼只保留唯一字串，無效排序回 native�
 | --- | --- |
 | package.json | name／version／description 識別套件；author 為 MiuDog；repository.type／url 指向 GitHub Git 儲存庫；private 防止 npm 意外發佈；main 指定產物；type 指定工具 ESM；scripts.dev 監看、build 型別檢查與建置、test 執行 Node 測試；devDependencies 為 esbuild／obsidian／typescript。 |
 | manifest.json | id 安裝目錄與識別；name 顯示名稱；version 發行版；minAppVersion 為套件最低目標，完整內部 API 僅確認 1.14.5；description 用途；author 為 MiuDog，authorUrl 為作者 GitHub；isDesktopOnly=false 支援行動載入，已模擬驗證，實機待驗證。 |
-| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0 與 0.7.0 對應 1.5.0，與 manifest 契約一致。 |
+| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0、0.7.0 與 0.7.1 對應 1.5.0，與 manifest 契約一致。 |
 | tsconfig.json | compilerOptions.target／module／moduleResolution 編譯環境；lib ES／DOM 型別；strict／noImplicitReturns／noUncheckedIndexedAccess 檢查；isolatedModules 配合 esbuild；skipLibCheck 跳過依賴；include 限定 src。 |
 | esbuild options | entryPoints 入口；bundle 合併；external 排除宿主；format／target 產物格式；outfile 檔名；sourcemap 開發啟用。 |
 
@@ -339,7 +339,21 @@ data.json 使用 ExplorerPreferences 契約；package-lock.json 為 npm 依賴�
 
 ## GitHub 發布
 
-公開儲存庫為 MiuDog/FlatExplorer，Release 標籤與 manifest.version 一致，目前使用 0.7.0。發行附件為 main.js、manifest.json、styles.css 與含 flat-explorer 資料夾的 flat-explorer.zip。main.js／dist／node_modules／.qa 由 .gitignore 排除，不將本機測試資料、Vault 偏好、截圖或依賴套件提交到原始碼儲存庫。
+公開儲存庫為 MiuDog/FlatExplorer，Release 標籤與 manifest.version 一致，目前使用 0.7.1。發行附件為 main.js、manifest.json、styles.css 與含 flat-explorer 資料夾的 flat-explorer.zip。main.js／dist／node_modules／.qa 由 .gitignore 排除，不將本機測試資料、Vault 偏好、截圖或依賴套件提交到原始碼儲存庫。
+
+0.7.1 將排序橫線改由外層 flat-explorer-item 的 ::after 繪製。showInsertionLine 保留列上的 drop-before／drop-after 標記，並在父容器加上 insert-before／insert-after；桌面 dragover 與觸控 updateTouchDrag 共用此方法。外層容器 position:relative、overflow:visible；橫線為 2px、無圓角，位於容器上／下邊界外 1px，不使用檔案列的 inset shadow，因此不受列圓角或內部 overflow 裁切。clearDragIndicators 與桌面 dragleave 一併清除父容器標記。資料夾中央的移入高亮維持原有 outline，與排序橫線分開。
+
+```mermaid
+flowchart LR
+	Desktop[桌面 dragover] --> Show[showInsertionLine]
+	Touch[updateTouchDrag 排序落點] --> Show
+	Show --> Row[列保留 drop-before / drop-after]
+	Show --> Parent[父容器 insert-before / insert-after]
+	Parent --> Line[外層 ::after 完整橫線]
+	End[dragleave / clearDragIndicators] --> Clear[清除列與父容器標記]
+```
+
+0.7.1 通過十五個單元案例與七項實際 DOM／樣式檢查：前後位置、無圓角 2px 橫線、全寬、移除 inset shadow、切換方向清除舊位置、大圓角及 overflow:hidden 壓力條件、結束後清除。已檢查實際截圖，橫線呈現在兩項目之間；檢查後還原面板與樣式。
 
 ## 行動裝置下載文件與發行附件
 

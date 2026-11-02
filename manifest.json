@@ -1,7 +1,7 @@
 {
 	"id": "flat-explorer",
 	"name": "FlatExplorer",
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"minAppVersion": "1.5.0",
 	"description": "Browse a folder path and its immediate folders and files in a flat view.",
 	"author": "MiuDog",

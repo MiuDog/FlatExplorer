@@ -78,12 +78,29 @@
 	opacity: 0.5;
 }
 
-.flat-explorer-row.flat-explorer-drop-before {
-	box-shadow: inset 0 2px 0 var(--interactive-accent);
+.flat-explorer .flat-explorer-item {
+	position: relative;
+	overflow: visible;
 }
 
-.flat-explorer-row.flat-explorer-drop-after {
-	box-shadow: inset 0 -2px 0 var(--interactive-accent);
+.flat-explorer-item.flat-explorer-insert-before::after,
+.flat-explorer-item.flat-explorer-insert-after::after {
+	content: "";
+	position: absolute;
+	inset-inline: 0;
+	height: 2px;
+	border-radius: 0;
+	background-color: var(--interactive-accent);
+	pointer-events: none;
+	z-index: 1;
+}
+
+.flat-explorer-item.flat-explorer-insert-before::after {
+	top: -1px;
+}
+
+.flat-explorer-item.flat-explorer-insert-after::after {
+	bottom: -1px;
 }
 
 .flat-explorer .flat-explorer-row.flat-explorer-drop-into {
