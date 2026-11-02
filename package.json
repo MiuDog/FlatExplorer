@@ -1,0 +1,23 @@
+{
+	"name": "flat-explorer",
+	"version": "0.6.0",
+	"private": true,
+	"description": "Browse folders and files in a flat Obsidian sidebar.",
+	"author": "MiuDog",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/MiuDog/FlatExplorer.git"
+	},
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc --noEmit && node esbuild.config.mjs production",
+		"test": "node --test tests/*.test.mjs"
+	},
+	"devDependencies": {
+		"esbuild": "0.25.5",
+		"obsidian": "latest",
+		"typescript": "^5.8.3"
+	}
+}
