@@ -7,8 +7,10 @@
 | 定義 | 原始碼 | 責任 |
 | --- | --- | --- |
 | FlatExplorerPlugin | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 註冊入口、載入偏好、序列化保存與同步路徑。 |
+| FlatExplorerSettings | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 使用 Obsidian 設定開關保存啟動還原偏好。 |
+| ExplorerTabState | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 一個編輯區分頁的目錄與隱藏項目暫顯狀態。 |
 | FlatExplorerView | [src/FlatExplorerView.ts](src/FlatExplorerView.ts) | 平面兩區、導覽、排序、項目與空白選單、hover、就地改名。 |
-| ExplorerPreferences | [src/explorer_preferences.ts](src/explorer_preferences.ts) | pinned／hidden／manualOrder 路徑陣列及 sortOrder 代碼。 |
+| ExplorerPreferences | [src/explorer_preferences.ts](src/explorer_preferences.ts) | pinned／hidden／manualOrder 路徑陣列、sortOrder 代碼與 restoreTabOnStartup 開關。 |
 | ExplorerHost | [src/native_explorer.ts](src/native_explorer.ts) | App 的核心啟用狀態相容契約。 |
 | NativeExplorer | [src/native_explorer.ts](src/native_explorer.ts) | 核心內部檔案總管介面，繼承 ItemView、HoverParent。 |
 | NativeRow | [src/native_explorer.ts](src/native_explorer.ts) | 本面板列的選單定位與 tooltip 文字資訊。 |
@@ -23,6 +25,9 @@
 ```mermaid
 classDiagram
 	Plugin <|-- FlatExplorerPlugin
+	PluginSettingTab <|-- FlatExplorerSettings
+	FlatExplorerSettings --> FlatExplorerPlugin : 設定讀寫
+	FlatExplorerPlugin *-- ExplorerTabState : 依分頁識別保存
 	ItemView <|-- FlatExplorerView
 	HoverParent <|.. FlatExplorerView
 	ItemView <|-- NativeExplorer
@@ -51,29 +56,30 @@ classDiagram
 ```mermaid
 flowchart TD
 	Load[Plugin.onload] --> Read[loadData → parsePreferences]
-	Read --> Register[registerView / registerHoverLinkSource / 入口回呼]
-	Register --> Activate[activateView]
-	Activate --> Exists{已有面板}
-	Exists -->|否| New[getLeftLeaf → setViewState]
-	Exists -->|是| Reveal[revealLeaf]
-	New --> Reveal
-	New --> Open[View.onOpen]
-	Open --> Root[設定根目錄]
-	Root --> Render[render]
-	Open --> Events[create / delete / rename / modify / file-open 回呼]
-	Events --> Refresh[refresh]
-	Open --> Interval[每秒檢查 sortOrder 的回呼]
-	Interval --> Changed{排序代碼改變}
-	Changed -->|是| Refresh
-	Refresh --> Editing{正在重新命名}
-	Editing -->|是| Wait[延後至編輯結束]
-	Editing -->|否| Valid{當前目錄仍存在}
-	Valid -->|否| Reset[回根目錄]
-	Valid -->|是| Render
-	Reset --> Render
+	Read --> Register[註冊視圖、設定頁與入口]
+	Register --> Layout[onLayoutReady → initializeTabStates]
+	Layout --> Saved[tabId → 讀取同一版面分頁的本機狀態]
+	Saved --> Option{啟動還原已啟用}
+	Option -->|是| Refresh[refresh → tabState → render]
+	Option -->|否| Reset[目前分頁從根目錄開始]
+	Reset --> Refresh
+	Register --> Activate[activateView → 重用或建立非作用中頁籤]
+	Activate --> Preload[loadIfDeferred → onOpen 首次繪製]
+	Preload --> Reveal[revealLeaf → 展開行動抽屜]
+	Preload --> Refresh
+	Preload --> Native[onLayoutReady → ensureNativeContext]
+	Events[active-leaf-change / file-open / Vault 事件] --> Refresh
+	Actions[navigate / 隱藏項目開關] --> Remember[rememberLocation → rememberTabState]
+	NewTab[openFile 另開分頁] --> Remember
+	Remember --> Persist[persistTabStates → Vault 本機儲存]
+	Rename[Vault rename / delete] --> Remap[remapTabStates → remapPaths]
+	Remap --> Persist
+	Settings[FlatExplorerSettings.display → onChange] --> Preferences[savePreferences]
 ```
 
-Plugin.onload 的 rename／delete 回呼使用 remapPaths 更新 pinned、hidden 與 manualOrder，再呼叫 savePreferences。祖先改名會同步後代；刪除清理偏好。View.onClose 清理浮窗與拖曳來源，registerEvent／registerInterval 由宿主清理訂閱與計時器。refresh 在編輯或拖曳期間延後重繪，避免移除來源 DOM。activateView 無可用側欄即返回；宿主載入錯誤向外傳遞。
+activeExplorerTab 讀取最近使用的編輯區分頁，側欄焦點不會覆蓋其瀏覽狀態。tabId 取 Obsidian 工作區版面中的分頁識別，同一檔案在兩個分頁各有狀態。initializeTabStates 只還原版面中仍存在的識別，預設只讓啟動分頁從根目錄開始。分頁瀏覽狀態使用 Vault 本機儲存；啟動偏好仍經 savePreferences 寫入 data.json。
+
+Plugin.onload 的 rename／delete 回呼使用 remapPaths 同步分頁目錄及 pinned、hidden、manualOrder。refresh 解析目錄，無效時回根目錄，並在編輯或拖曳期間延後重繪。onOpen 訂閱檔案及分頁事件，每秒檢查原生排序或實例；onClose 清理預覽與拖曳。原生橋接在版面就緒後恢復，首次繪製不等待原生檔案列表。activateView 無可用側欄即返回；宿主載入錯誤向外傳遞。
 
 ## 平面顯示與排序
 
@@ -93,11 +99,11 @@ flowchart TD
 	Rows --> Click[click / auxclick / keydown activate 回呼]
 	Path --> Click
 	Click --> Folder{資料夾}
-	Folder -->|是| Navigate[navigate → render]
+	Folder -->|是| Navigate[navigate → rememberLocation → render]
 	Folder -->|否| File[openFile → workspace.openFile]
 	Toolbar --> SortMenu[showSortMenu]
 	SortMenu --> Mode[選定模式回呼 → savePreferences]
-	Toolbar --> Hidden[眼睛回呼切換 showHidden → render]
+	Toolbar --> Hidden[眼睛回呼切換 showHidden → rememberLocation → render]
 ```
 
 compareEntries 先比較 pinned。manual 模式接著比較 manualOrder 路徑索引，允許資料夾與檔案混排；沒有保存索引的項目排在已保存項目之後，再使用原有資料夾優先及自然名稱序。其他模式維持資料夾優先，檔案與置頂群組套用六種名稱／時間排序；時間相同以名稱穩定排序。sortOrder 在 native 模式讀取核心 view 的代碼，否則讀偏好。render 的 filter／sort 回呼僅處理直屬項目。路徑區不受隱藏列表影響，確保能返回。

@@ -1,6 +1,6 @@
 {
 	"name": "flat-explorer",
-	"version": "0.7.2",
+	"version": "0.8.0",
 	"private": true,
 	"description": "Browse folders and files in a flat Obsidian sidebar.",
 	"author": "MiuDog",

@@ -31,9 +31,10 @@ rowFiles: WeakMap<HTMLElement, TAbstractFile>，列對應的原始物件身分�
 
 constructor(leaf: WorkspaceLeaf，宿主面板；plugin: FlatExplorerPlugin，偏好協作者)：建立視圖。
 getViewType()、getDisplayText()、getIcon()：無輸入；string，分別回傳識別、名稱、圖示。
-onOpen()：無輸入；Promise<void>，行動端註冊長按，喚醒延遲載入的核心側欄，訂閱檔案與作用中文件事件並繪製。
+onOpen()：無輸入；Promise<void>，行動端註冊長按，先繪製當前分頁狀態，訂閱事件並於版面就緒後恢復原生橋接。
 onClose()：無輸入；Promise<void>，清理預覽。
 refresh()：無輸入；void，驗證目錄並重繪；編輯或拖曳中延後至完成。
+rememberLocation()：無輸入；void，保存當前資料夾及隱藏項目顯示狀態。
 nativeExplorer()：無輸入；NativeExplorer | null，掃描可用核心檔案總管。
 ensureNativeContext()：無輸入；Promise<void>，延遲載入或補建已啟用的核心面板並重繪；失敗保留主題提示降級。
 sortOrder()：無輸入；string，解析偏好或目前原生排序。
@@ -100,7 +101,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 	async onOpen(): Promise<void> {
 		// 監看 Vault 與作用中文件；排序只在實際改變時觸發重繪。
-		this.currentFolder = this.app.vault.getRoot();
+		this.contentEl.addClass("flat-explorer");
 		if (Platform.isMobile) {
 			this.touchMenus = new TouchContextMenu(this.contentEl);
 			this.addChild(this.touchMenus);
@@ -115,11 +116,6 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			this.addChild(this.touchDrag);
 		}
 
-		for (const nativeLeaf of this.app.workspace.getLeavesOfType("file-explorer")) {
-			if (typeof nativeLeaf.loadIfDeferred === "function")
-				await nativeLeaf.loadIfDeferred();
-		}
-
 		this.registerDomEvent(this.contentEl, "contextmenu", (event) => {
 			if (event.target instanceof Element && !event.target.closest(".flat-explorer-row, .flat-explorer-toolbar, input"))
 				this.showBackgroundContext(event);
@@ -129,12 +125,16 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		this.registerEvent(this.app.vault.on("rename", () => this.refresh()));
 		this.registerEvent(this.app.vault.on("modify", () => this.refresh()));
 		this.registerEvent(this.app.workspace.on("file-open", () => this.refresh()));
+		this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
+			if (leaf && leaf === this.plugin.activeExplorerTab())
+				this.refresh();
+		}));
 		this.registerInterval(window.setInterval(() => {
 			const order = this.sortOrder();
 			if (order !== this.lastNativeSort || this.nativeExplorer() !== (this.nativeContext ? Object.getPrototypeOf(this.nativeContext) : null))
 				this.refresh();
 		}, 1000));
-		this.render();
+		this.refresh();
 		this.app.workspace.onLayoutReady(() => void this.ensureNativeContext());
 	}
 
@@ -152,10 +152,11 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		if (this.editing || this.draggedPath || this.movingFile)
 			return;
 
-		// 祖先改名後仍保留物件身分；刪除後回到根目錄。
-		const folder = this.currentFolder;
-		if (!folder || this.app.vault.getAbstractFileByPath(folder.path) !== folder)
-			this.currentFolder = this.app.vault.getRoot();
+		// 依編輯區分頁取得位置；不存在的資料夾回到根目錄。
+		const state = this.plugin.tabState();
+		const folder = state ? this.app.vault.getAbstractFileByPath(state.folderPath) : null;
+		this.currentFolder = folder instanceof TFolder ? folder : this.app.vault.getRoot();
+		this.showHidden = state?.showHidden === true && folder instanceof TFolder;
 
 		this.render();
 	}
@@ -184,7 +185,13 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private navigate(folder: TFolder): void {
 		this.currentFolder = folder;
 		this.showHidden = false;
+		this.rememberLocation();
 		this.render();
+	}
+
+	private rememberLocation(): void {
+		if (this.currentFolder)
+			this.plugin.rememberTabState({ folderPath: this.currentFolder.path, showHidden: this.showHidden });
 	}
 
 	private render(): void {
@@ -225,6 +232,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			hidden.setAttribute("aria-pressed", String(this.showHidden));
 			hidden.addEventListener("click", () => {
 				this.showHidden = !this.showHidden;
+				this.rememberLocation();
 				this.render();
 			});
 		}
@@ -800,7 +808,12 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private async openFile(file: TFile, newLeaf: boolean): Promise<void> {
 		// 沿用宿主對各類檔案的處理。
 		try {
-			await this.app.workspace.getLeaf(newLeaf ? "tab" : false).openFile(file);
+			const state = this.currentFolder ? { folderPath: this.currentFolder.path, showHidden: this.showHidden } : null;
+			const leaf = this.app.workspace.getLeaf(newLeaf ? "tab" : false);
+			if (state && newLeaf)
+				this.plugin.rememberTabState(state, leaf);
+
+			await leaf.openFile(file);
 			if (Platform.isMobile)
 				this.app.workspace.leftSplit.collapse();
 		}

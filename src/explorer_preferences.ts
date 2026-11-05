@@ -6,6 +6,7 @@ ExplorerPreferences：可序列化的個別 Vault 顯示偏好。
 pinned: string[]，置頂檔案或資料夾路徑，改名時同步更新；Vault 根目錄不提供置頂。
 hidden: string[]，隱藏項目路徑，不修改實體檔案。
 sortOrder: string，native、manual 或原生六種排序代碼；未知值回到 native。
+restoreTabOnStartup: boolean，啟動時還原作用中分頁的瀏覽狀態。
 manualOrder: string[]，Vault 路徑的自訂順序，各目錄只比較自身直屬項目；未排序的新項目排在已保存項目之後。
 
 */
@@ -14,6 +15,7 @@ export interface ExplorerPreferences {
 	hidden: string[];
 	sortOrder: string;
 	manualOrder: string[];
+	restoreTabOnStartup: boolean;
 }
 
 /* 排序代碼對應顯示名稱；native 表示讀取原生檔案總管目前排序。 */
@@ -36,7 +38,8 @@ export function parsePreferences(value: unknown): ExplorerPreferences {
 		pinned: paths(data.pinned),
 		hidden: paths(data.hidden),
 		sortOrder: typeof data.sortOrder === "string" && Object.prototype.hasOwnProperty.call(SORT_LABELS, data.sortOrder) ? data.sortOrder : "native",
-		manualOrder: paths(data.manualOrder)
+		manualOrder: paths(data.manualOrder),
+		restoreTabOnStartup: data.restoreTabOnStartup === true
 	};
 }
 
