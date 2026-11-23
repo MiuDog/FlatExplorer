@@ -25,7 +25,10 @@ touchDrag: TouchFileDrag | null，物件長按拖曳管理器。
 touchDrop: TouchDropTarget | null，目前通過驗證的放置目標。
 dragPreview: HTMLElement | null，跟隨手指的檔名與動作預覽。
 movingFile: boolean，是否正在由宿主搬移實體檔案，期間不接受新拖曳。
-touchSource: TAbstractFile | null，原始拖曳物件身分，避免刪除後同路徑重建被誤搬移。
+dragSource: TAbstractFile | null，原始拖曳物件身分，避免刪除後同路徑重建被誤搬移。
+dragScrollFrame: number | null，桌面拖曳邊緣自動捲動的 animation frame。
+dragScrollSpeed: number，桌面拖曳自動捲動方向與每幀像素。
+dragScroller: HTMLElement | null，桌面拖曳目前捲動的區段容器。
 nativeLoading: Promise<void> | null，合併原生面板的非同步恢復，避免重複建立。
 rowFiles: WeakMap<HTMLElement, TAbstractFile>，列對應的原始物件身分，拒絕拖曳期間已變更的列。
 
@@ -49,7 +52,11 @@ addMenuItems(menu: Menu，宿主選單；file: TAbstractFile，目標)：void，
 addMoveMenuItems(menu: Menu，宿主選單；file: TAbstractFile，目標)：void，行動端手動模式提供同分組上移／下移。
 getMoveTarget(file: TAbstractFile，目標；direction: number，-1 上移、1 下移)：TAbstractFile | undefined，取得可見同層且同置頂分組的相鄰項目。
 showSortMenu(event: MouseEvent，位置)：void，顯示八種排序選擇並保存；首次手動模式保留原有排序。
-bindManualDragging(row: HTMLElement，目標列；file: TAbstractFile，直屬項目)：void，手動模式綁定拖曳與前後插入指示，不搬移實體檔案。
+bindDesktopDragging(row: HTMLElement，目標列；file: TAbstractFile，項目；isPath: boolean，路徑列)：void，桌面拖曳直屬項目至資料夾、路徑區上層目錄或手動順序。
+resolveDropTarget(row: HTMLElement，候選列；target: TAbstractFile，目標項目；isPath: boolean，路徑列；clientY: number，垂直座標)：{ drop: TouchDropTarget | null; description: string }，統一桌面與觸控的排序／搬移目標與衝突檢查。
+moveFileToFolder(sourcePath: string，來源路徑；expectedSource: TAbstractFile，來源身分；targetPath: string，目的路徑；expectedTarget: TFolder，目的身分)：Promise<void>，重驗身分與同名衝突後透過 FileManager 搬移。
+updateDesktopAutoScroll(scroller: HTMLElement，捲動容器；clientY: number，垂直座標)：void，桌面拖曳靠近上下邊緣時捲動以便抵達路徑區或長列表。
+stopDesktopAutoScroll()：無輸入；void，停止桌面拖曳自動捲動。
 canReorder(source: string，來源路徑；target: TAbstractFile，目的項目)：boolean，檢查手動模式、直屬同層與置頂分組，不接受外來項目。
 moveEntry(source: string，來源路徑；target: TAbstractFile，目的項目；after: boolean，是否插入其後)：void，保存包含隱藏項的目錄順序，其他目錄順序不受影響。
 clearDragIndicators(clearSource: boolean = true，是否一併清除來源外觀)：void，移除插入線，結束拖曳時也清除來源狀態。
@@ -78,7 +85,10 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private touchDrop: TouchDropTarget | null = null;
 	private dragPreview: HTMLElement | null = null;
 	private movingFile = false;
-	private touchSource: TAbstractFile | null = null;
+	private dragSource: TAbstractFile | null = null;
+	private dragScrollFrame: number | null = null;
+	private dragScrollSpeed = 0;
+	private dragScroller: HTMLElement | null = null;
 	private nativeLoading: Promise<void> | null = null;
 	private rowFiles = new WeakMap<HTMLElement, TAbstractFile>();
 
@@ -141,6 +151,8 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	async onClose(): Promise<void> {
 		// 關閉面板時一併清理預覽浮窗。
 		this.draggedPath = null;
+		this.dragSource = null;
+		this.stopDesktopAutoScroll();
 		this.touchMenus?.cancel();
 		this.touchDrag?.cancel();
 		this.dragPreview?.remove();
@@ -200,6 +212,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			return;
 
 		// 步驟 1：清理舊浮窗與 DOM，建立本輪列的原生映射。
+		this.stopDesktopAutoScroll();
 		this.touchMenus?.cancel();
 		this.touchDrag?.cancel();
 		this.nativeContext?.hoverPopover?.unload();
@@ -239,6 +252,17 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 		// 步驟 3：兩區標題與分隔線同行，所有項目保持平面對齊。
 		const sections = this.contentEl.createDiv("nav-files-container flat-explorer-sections");
+		if (!Platform.isMobile) {
+			sections.addEventListener("dragover", (event) => {
+				if (this.draggedPath)
+					this.updateDesktopAutoScroll(sections, event.clientY);
+			}, { capture: true });
+			sections.addEventListener("dragleave", (event) => {
+				if (!(event.relatedTarget instanceof Node) || !sections.contains(event.relatedTarget))
+					this.stopDesktopAutoScroll();
+			});
+		}
+
 		const headingId = `flat-explorer-${Math.random().toString(36).slice(2)}`;
 		const pathSection = sections.createEl("nav", { cls: "flat-explorer-path", attr: { "aria-labelledby": `${headingId}-path` } });
 		pathSection.createEl("h3", { text: "路徑", cls: "flat-explorer-heading", attr: { id: `${headingId}-path` } });
@@ -246,6 +270,9 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			this.renderRow(pathSection, item, true);
 
 		const contents = sections.createEl("section", { cls: "flat-explorer-contents", attr: { "aria-labelledby": `${headingId}-contents` } });
+		if (this.lastNativeSort === "manual")
+			contents.addClass("flat-explorer-manual");
+
 		contents.createEl("h3", { text: "當前目錄", cls: "flat-explorer-heading", attr: { id: `${headingId}-contents` } });
 
 		// 步驟 4：過濾隱藏項，套用置頂與排序；preferences 沿用既有契約。
@@ -351,8 +378,8 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			}
 		});
 		row.addEventListener("contextmenu", (event) => this.showContext(event, file));
-		if (!isPath && this.sortOrder() === "manual" && !Platform.isMobile)
-			this.bindManualDragging(row, file);
+		if (!Platform.isMobile)
+			this.bindDesktopDragging(row, file, isPath);
 
 		// NativeRow 契約提供本面板的定位元素與文字截斷資訊。
 		const native = this.nativeContext;
@@ -548,33 +575,50 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		menu.showAtMouseEvent(event);
 	}
 
-	private bindManualDragging(row: HTMLElement, file: TAbstractFile): void {
-		// 只在手動模式提供本面板內部的排列拖曳，不使用宿主的檔案搬移資料格式。
-		row.draggable = true;
-		row.addEventListener("dragstart", (event) => {
-			if (this.editing || this.sortOrder() !== "manual") {
-				event.preventDefault();
-				return;
-			}
+	private bindDesktopDragging(row: HTMLElement, file: TAbstractFile, isPath: boolean): void {
+		// 直屬項目可拖移至資料夾或路徑區上層；手動排序額外支援同層插入調整。
+		if (!isPath) {
+			row.draggable = true;
+			row.addEventListener("dragstart", (event) => {
+				if (this.editing || this.movingFile || this.app.vault.getAbstractFileByPath(file.path) !== file || !this.currentFolder?.children.includes(file)) {
+					event.preventDefault();
+					return;
+				}
 
-			event.stopPropagation();
-			this.draggedPath = file.path;
-			row.addClass("is-dragging");
-			if (event.dataTransfer) {
-				event.dataTransfer.effectAllowed = "move";
-				event.dataTransfer.setData("application/x-flat-explorer-order", file.path);
-			}
-		});
+				event.stopPropagation();
+				this.draggedPath = file.path;
+				this.dragSource = file;
+				row.addClass("is-dragging");
+				if (event.dataTransfer) {
+					event.dataTransfer.effectAllowed = "move";
+					event.dataTransfer.setData("application/x-flat-explorer-order", file.path);
+				}
+			});
+			row.addEventListener("dragend", () => {
+				this.draggedPath = null;
+				this.dragSource = null;
+				this.stopDesktopAutoScroll();
+				this.clearDragIndicators();
+				this.refresh();
+			});
+		}
+
 		row.addEventListener("dragover", (event) => {
-			if (!this.draggedPath || !this.canReorder(this.draggedPath, file))
+			if (!this.draggedPath || !this.dragSource)
+				return;
+
+			this.clearDragIndicators(false);
+			const { drop } = this.resolveDropTarget(row, file, isPath, event.clientY);
+			if (!drop)
 				return;
 
 			event.preventDefault();
 			event.stopPropagation();
-			this.clearDragIndicators(false);
-			const rect = row.getBoundingClientRect();
-			const after = event.clientY >= rect.top + rect.height / 2;
-			this.showInsertionLine(row, after);
+			if (drop.kind === "move")
+				row.addClass("flat-explorer-drop-into");
+			else
+				this.showInsertionLine(row, drop.after);
+
 			if (event.dataTransfer)
 				event.dataTransfer.dropEffect = "move";
 		});
@@ -582,26 +626,127 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			if (event.relatedTarget instanceof Node && row.contains(event.relatedTarget))
 				return;
 
-			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after");
+			row.removeClass("flat-explorer-drop-before", "flat-explorer-drop-after", "flat-explorer-drop-into");
 			row.parentElement?.removeClass("flat-explorer-insert-before", "flat-explorer-insert-after");
 		});
 		row.addEventListener("drop", (event) => {
-			if (!this.draggedPath)
+			if (!this.draggedPath || !this.dragSource)
 				return;
 
 			event.preventDefault();
 			event.stopPropagation();
-			const source = this.draggedPath;
-			const rect = row.getBoundingClientRect();
+			const sourcePath = this.draggedPath;
+			const source = this.dragSource;
+			const targetPath = row.dataset.path ?? "";
+			const { drop } = this.resolveDropTarget(row, file, isPath, event.clientY);
 			this.draggedPath = null;
+			this.dragSource = null;
+			this.stopDesktopAutoScroll();
 			this.clearDragIndicators();
-			this.moveEntry(source, file, event.clientY >= rect.top + rect.height / 2);
+			if (!drop) {
+				this.refresh();
+				return;
+			}
+
+			if (drop.kind === "reorder") {
+				this.moveEntry(sourcePath, drop.target, drop.after);
+				return;
+			}
+
+			if (drop.target instanceof TFolder)
+				void this.moveFileToFolder(sourcePath, source, targetPath, drop.target);
 		});
-		row.addEventListener("dragend", () => {
-			this.draggedPath = null;
-			this.clearDragIndicators();
+	}
+
+	private resolveDropTarget(row: HTMLElement, target: TAbstractFile, isPath: boolean, clientY: number): { drop: TouchDropTarget | null; description: string } {
+		// 驗證來源與目標物件身分，避免拖曳期間刪改重建導致誤操作。
+		const candidate = this.draggedPath ? this.app.vault.getAbstractFileByPath(this.draggedPath) : null;
+		const source = candidate && candidate === this.dragSource ? candidate : null;
+		if (!source || target === source || target.path !== row.dataset.path || this.app.vault.getAbstractFileByPath(target.path) !== target)
+			return { drop: null, description: "拖至資料夾以移動" };
+
+		const rect = row.getBoundingClientRect();
+		const ratio = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+		const kind = getTouchDropKind(target instanceof TFolder, ratio, !isPath && this.sortOrder() === "manual");
+		if (kind === "move" && target instanceof TFolder) {
+			const path = getMovePath(source, target);
+			if (path && !this.app.vault.getAbstractFileByPath(path))
+				return { drop: { kind: "move", target, row, after: false }, description: `移動至：${target.isRoot() ? this.app.vault.getName() : target.name}` };
+
+			return { drop: null, description: path ? "目標已有同名項目，不能放置" : "不能移入原位置、自身或子孫資料夾" };
+		}
+
+		if (kind === "before" || kind === "after") {
+			if (this.canReorder(source.path, target))
+				return { drop: { kind: "reorder", target, row, after: kind === "after" }, description: `排序：放在「${target.name}」${kind === "after" ? "之後" : "之前"}` };
+
+			return { drop: null, description: "不能跨置頂群組調整順序" };
+		}
+
+		return { drop: null, description: "此排序模式請拖至資料夾以移動" };
+	}
+
+	private async moveFileToFolder(sourcePath: string, expectedSource: TAbstractFile, targetPath: string, expectedTarget: TFolder): Promise<void> {
+		// 放開時重新以原始路徑核對身分與同名衝突，確保不覆寫既有項目。
+		const source = this.app.vault.getAbstractFileByPath(sourcePath);
+		const target = this.app.vault.getAbstractFileByPath(targetPath);
+		const destination = source === expectedSource && source && target === expectedTarget && target instanceof TFolder ? getMovePath(source, target) : null;
+		if (!source || !destination || this.app.vault.getAbstractFileByPath(destination)) {
+			new Notice("無法移動：來源或目標已變更，或目標已有同名項目。");
 			this.refresh();
-		});
+			return;
+		}
+
+		this.movingFile = true;
+		try {
+			await this.app.fileManager.renameFile(source, destination);
+		}
+		catch (error) {
+			new Notice(`移動失敗：${error instanceof Error ? error.message : String(error)}`);
+		}
+		finally {
+			this.movingFile = false;
+			this.refresh();
+		}
+	}
+
+	private updateDesktopAutoScroll(scroller: HTMLElement, clientY: number): void {
+		const rect = scroller.getBoundingClientRect();
+		let speed = 0;
+		if (clientY >= rect.top && clientY < rect.top + 36)
+			speed = -10;
+		else if (clientY <= rect.bottom && clientY > rect.bottom - 36)
+			speed = 10;
+
+		if (!speed) {
+			this.stopDesktopAutoScroll();
+			return;
+		}
+
+		this.dragScroller = scroller;
+		this.dragScrollSpeed = speed;
+		if (this.dragScrollFrame !== null)
+			return;
+
+		const step = (): void => {
+			if (!this.draggedPath || !this.dragScrollSpeed || !this.dragScroller?.isConnected) {
+				this.stopDesktopAutoScroll();
+				return;
+			}
+
+			this.dragScroller.scrollTop += this.dragScrollSpeed;
+			this.dragScrollFrame = this.contentEl.win.requestAnimationFrame(step);
+		};
+		this.dragScrollFrame = this.contentEl.win.requestAnimationFrame(step);
+	}
+
+	private stopDesktopAutoScroll(): void {
+		if (this.dragScrollFrame !== null)
+			this.contentEl.win.cancelAnimationFrame(this.dragScrollFrame);
+
+		this.dragScrollFrame = null;
+		this.dragScrollSpeed = 0;
+		this.dragScroller = null;
 	}
 
 	private canReorder(source: string, target: TAbstractFile): boolean {
@@ -653,7 +798,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 		// 提供來源與動作預覽；固定定位不攔截 elementFromPoint 的落點偵測。
 		this.draggedPath = source.path;
-		this.touchSource = source;
+		this.dragSource = source;
 		row.addClass("is-dragging");
 		this.dragPreview = this.contentEl.doc.body.createDiv({ cls: "flat-explorer-drag-preview", attr: { "aria-hidden": "true" } });
 		this.dragPreview.createDiv({ cls: "flat-explorer-drag-name", text: source.name });
@@ -665,39 +810,21 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 	private updateTouchDrag(x: number, y: number): void {
 		this.clearDragIndicators(false);
 		this.touchDrop = null;
-		const candidate = this.draggedPath ? this.app.vault.getAbstractFileByPath(this.draggedPath) : null;
-		const source = candidate === this.touchSource ? candidate : null;
 		const element = this.contentEl.doc.elementFromPoint(x, y);
 		const row = element?.closest<HTMLElement>(".flat-explorer-row");
 		let description = "拖至資料夾以移動";
-		if (source && row && this.contentEl.contains(row)) {
+		if (row && this.contentEl.contains(row)) {
 			const target = this.rowFiles.get(row);
-			if (target && target !== source && target.path === row.dataset.path && this.app.vault.getAbstractFileByPath(target.path) === target) {
-				const rect = row.getBoundingClientRect();
-				const isPath = !!row.closest(".flat-explorer-path");
-				const ratio = rect.height > 0 ? (y - rect.top) / rect.height : 0.5;
-				const kind = getTouchDropKind(target instanceof TFolder, ratio, !isPath && this.sortOrder() === "manual");
-				if (kind === "move" && target instanceof TFolder) {
-					const path = getMovePath(source, target);
-					if (path && !this.app.vault.getAbstractFileByPath(path)) {
-						this.touchDrop = { kind: "move", target, row, after: false };
+			if (target) {
+				const result = this.resolveDropTarget(row, target, !!row.closest(".flat-explorer-path"), y);
+				description = result.description;
+				if (result.drop) {
+					this.touchDrop = result.drop;
+					if (result.drop.kind === "move")
 						row.addClass("flat-explorer-drop-into");
-						description = `移動至：${target.isRoot() ? this.app.vault.getName() : target.name}`;
-					}
 					else
-						description = path ? "目標已有同名項目，不能放置" : "不能移入原位置、自身或子孫資料夾";
+						this.showInsertionLine(row, result.drop.after);
 				}
-				else if (kind === "before" || kind === "after") {
-					if (this.canReorder(source.path, target)) {
-						this.touchDrop = { kind: "reorder", target, row, after: kind === "after" };
-						this.showInsertionLine(row, kind === "after");
-						description = `排序：放在「${target.name}」${kind === "after" ? "之後" : "之前"}`;
-					}
-					else
-						description = "不能跨置頂群組調整順序";
-				}
-				else
-					description = "此排序模式請拖至資料夾以移動";
 			}
 		}
 
@@ -712,10 +839,10 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 
 	private async finishTouchDrag(cancelled: boolean): Promise<void> {
 		const sourcePath = this.draggedPath;
-		const expectedSource = this.touchSource;
+		const expectedSource = this.dragSource;
 		const drop = this.touchDrop;
 		this.draggedPath = null;
-		this.touchSource = null;
+		this.dragSource = null;
 		this.touchDrop = null;
 		this.dragPreview?.remove();
 		this.dragPreview = null;
@@ -730,27 +857,10 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			return;
 		}
 
-		// 放開時再次驗證來源、目的資料夾及同名衝突，避免拖曳期間的 Vault 變動造成誤操作。
-		const source = this.app.vault.getAbstractFileByPath(sourcePath);
-		const target = this.app.vault.getAbstractFileByPath(drop.target.path);
-		const destination = source === expectedSource && source && target === drop.target && target instanceof TFolder ? getMovePath(source, target) : null;
-		if (!source || !destination || this.app.vault.getAbstractFileByPath(destination)) {
-			new Notice("無法移動：來源或目標已變更，或目標已有同名項目。");
+		if (expectedSource && drop.target instanceof TFolder)
+			await this.moveFileToFolder(sourcePath, expectedSource, drop.row.dataset.path ?? "", drop.target);
+		else
 			this.refresh();
-			return;
-		}
-
-		this.movingFile = true;
-		try {
-			await this.app.fileManager.renameFile(source, destination);
-		}
-		catch (error) {
-			new Notice(`移動失敗：${error instanceof Error ? error.message : String(error)}`);
-		}
-		finally {
-			this.movingFile = false;
-			this.refresh();
-		}
 	}
 
 	private async renameFile(file: TAbstractFile): Promise<void> {
@@ -763,6 +873,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 			return;
 
 		this.editing = true;
+		row.draggable = false;
 		const input = row.createEl("input", { cls: "flat-explorer-rename", value: file.name, attr: { "aria-label": "重新命名" } });
 		const title = row.querySelector<HTMLElement>(".nav-file-title-content, .nav-folder-title-content");
 		if (title)
@@ -810,7 +921,7 @@ export class FlatExplorerView extends ItemView implements HoverParent {
 		try {
 			const state = this.currentFolder ? { folderPath: this.currentFolder.path, showHidden: this.showHidden } : null;
 			const leaf = this.app.workspace.getLeaf(newLeaf ? "tab" : false);
-			if (state && newLeaf)
+			if (state)
 				this.plugin.rememberTabState(state, leaf);
 
 			await leaf.openFile(file);

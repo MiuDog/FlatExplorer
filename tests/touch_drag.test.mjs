@@ -61,3 +61,18 @@ test("禁止搬移根目錄、資料夾自身或子孫，不誤判同名前綴",
 	assert.equal(getMovePath(source, descendant), null);
 	assert.equal(getMovePath(source, sibling), "AA/A");
 });
+
+test("路徑區資料夾在任何高度比例皆接受搬移，資料夾可移回上層、根目錄或同層資料夾", () => {
+	for (const ratio of [0, 0.25, 0.5, 0.75, 1])
+		assert.equal(getTouchDropKind(true, ratio, false), "move");
+
+	const root = folder("/");
+	const grandParent = folder("Workspace", root);
+	const parent = folder("Workspace/Projects", grandParent);
+	const sibling = folder("Workspace/Projects/Archive", parent);
+	const targetFolder = folder("Workspace/Projects/Sub", parent);
+	assert.equal(getMovePath(targetFolder, grandParent), "Workspace/Sub");
+	assert.equal(getMovePath(targetFolder, root), "Sub");
+	assert.equal(getMovePath(targetFolder, sibling), "Workspace/Projects/Archive/Sub");
+	assert.equal(getMovePath(targetFolder, parent), null);
+});

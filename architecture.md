@@ -8,9 +8,9 @@
 | --- | --- | --- |
 | FlatExplorerPlugin | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 註冊入口、載入偏好、序列化保存與同步路徑。 |
 | FlatExplorerSettings | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 使用 Obsidian 設定開關保存啟動還原偏好。 |
-| ExplorerTabState | [src/FlatExplorerPlugin.ts](src/FlatExplorerPlugin.ts) | 一個編輯區分頁的目錄與隱藏項目暫顯狀態。 |
-| FlatExplorerView | [src/FlatExplorerView.ts](src/FlatExplorerView.ts) | 平面兩區、導覽、排序、項目與空白選單、hover、就地改名。 |
-| ExplorerPreferences | [src/explorer_preferences.ts](src/explorer_preferences.ts) | pinned／hidden／manualOrder 路徑陣列、sortOrder 代碼與 restoreTabOnStartup 開關。 |
+| ExplorerTabState | [src/tab_state.ts](src/tab_state.ts) | 一個編輯區分頁的目錄與隱藏項目暫顯狀態，並提供啟動還原與路徑同步純函式。 |
+| FlatExplorerView | [src/FlatExplorerView.ts](src/FlatExplorerView.ts) | 平面兩區、導覽、排序、拖曳排序與搬移、項目與空白選單、hover、就地改名。 |
+| ExplorerPreferences | [src/explorer_preferences.ts](src/explorer_preferences.ts) | pinned／hidden／manualOrder 路徑陣列、sortOrder 代碼與 resetTabOnStartup 開關。 |
 | ExplorerHost | [src/native_explorer.ts](src/native_explorer.ts) | App 的核心啟用狀態相容契約。 |
 | NativeExplorer | [src/native_explorer.ts](src/native_explorer.ts) | 核心內部檔案總管介面，繼承 ItemView、HoverParent。 |
 | NativeRow | [src/native_explorer.ts](src/native_explorer.ts) | 本面板列的選單定位與 tooltip 文字資訊。 |
@@ -58,8 +58,8 @@ flowchart TD
 	Load[Plugin.onload] --> Read[loadData → parsePreferences]
 	Read --> Register[註冊視圖、設定頁與入口]
 	Register --> Layout[onLayoutReady → initializeTabStates]
-	Layout --> Saved[tabId → 讀取同一版面分頁的本機狀態]
-	Saved --> Option{啟動還原已啟用}
+	Layout --> Saved[tabId／FALLBACK_TAB_ID → restoreTabStates]
+	Saved --> Option{resetTabOnStartup 為 false（預設）}
 	Option -->|是| Refresh[refresh → tabState → render]
 	Option -->|否| Reset[目前分頁從根目錄開始]
 	Reset --> Refresh
@@ -77,7 +77,7 @@ flowchart TD
 	Settings[FlatExplorerSettings.display → onChange] --> Preferences[savePreferences]
 ```
 
-activeExplorerTab 讀取最近使用的編輯區分頁，側欄焦點不會覆蓋其瀏覽狀態。tabId 取 Obsidian 工作區版面中的分頁識別，同一檔案在兩個分頁各有狀態。initializeTabStates 只還原版面中仍存在的識別，預設只讓啟動分頁從根目錄開始。分頁瀏覽狀態使用 Vault 本機儲存；啟動偏好仍經 savePreferences 寫入 data.json。
+activeExplorerTab 讀取最近使用的編輯區分頁，側欄焦點不會覆蓋其瀏覽狀態。tabId 取 Obsidian 工作區版面中的分頁識別，無開啟編輯分頁時使用 FALLBACK_TAB_ID（`__default__`）；同一檔案在兩個分頁各有狀態。restoreTabStates 預設同時還原目前分頁與其他仍存在於版面的分頁狀態，並保留版面就緒前的使用者導覽操作；僅在設定關閉「啟動時還原當前分頁」（`resetTabOnStartup: true`）時讓啟動分頁從根目錄開始。分頁瀏覽狀態使用 Vault 本機儲存；重設偏好仍經 savePreferences 寫入 data.json。
 
 Plugin.onload 的 rename／delete 回呼使用 remapPaths 同步分頁目錄及 pinned、hidden、manualOrder。refresh 解析目錄，無效時回根目錄，並在編輯或拖曳期間延後重繪。onOpen 訂閱檔案及分頁事件，每秒檢查原生排序或實例；onClose 清理預覽與拖曳。原生橋接在版面就緒後恢復，首次繪製不等待原生檔案列表。activateView 無可用側欄即返回；宿主載入錯誤向外傳遞。
 
@@ -108,7 +108,7 @@ flowchart TD
 
 compareEntries 先比較 pinned。manual 模式接著比較 manualOrder 路徑索引，允許資料夾與檔案混排；沒有保存索引的項目排在已保存項目之後，再使用原有資料夾優先及自然名稱序。其他模式維持資料夾優先，檔案與置頂群組套用六種名稱／時間排序；時間相同以名稱穩定排序。sortOrder 在 native 模式讀取核心 view 的代碼，否則讀偏好。render 的 filter／sort 回呼僅處理直屬項目。路徑區不受隱藏列表影響，確保能返回。
 
-## 手動排序
+## 手動排序與桌面搬移
 
 ```mermaid
 flowchart TD
@@ -117,24 +117,28 @@ flowchart TD
 	Existing -->|是| Keep[保留 manualOrder]
 	Seed --> Save[savePreferences → render]
 	Keep --> Save
-	Save --> Bind[renderRow → bindManualDragging]
-	Bind --> Start[dragstart：設定 draggedPath 與內部 DataTransfer]
-	Start --> Over[dragover → canReorder]
-	Over --> Valid{同一目錄、手動模式、相同置頂分組}
-	Valid -->|否| Reject[不接受落點]
-	Valid -->|是| Indicator[clearDragIndicators false，依游標上半或下半顯示插入線]
+	Save --> Bind[renderRow → bindDesktopDragging]
+	Bind --> Start[dragstart：設定 draggedPath 與 dragSource]
+	Start --> Edge[sections dragover → updateDesktopAutoScroll 邊緣捲動]
+	Start --> Over[dragover → resolveDropTarget]
+	Over --> DropKind{目標類型與位置}
+	DropKind -->|無效／衝突| Reject[不呼叫 preventDefault，禁止放置]
+	DropKind -->|手動模式列邊緣| Indicator[showInsertionLine 顯示插入線]
+	DropKind -->|資料夾或路徑區上層| Into[加入 flat-explorer-drop-into 高亮]
 	Indicator --> Drop[drop：清除拖曳來源 → moveEntry]
+	Into --> DropMove[drop：重驗身分與衝突 → moveFileToFolder]
+	DropMove --> Rename[fileManager.renameFile]
 	Drop --> Check[canReorder 再驗證]
 	Check --> Full[排序全部直屬項目，含隱藏項]
 	Full --> Reorder[reorderPaths：移除來源，再插入目標前後]
 	Reorder --> Merge[保留其他目錄記錄，替換此目錄順序]
 	Merge --> Persist[savePreferences 保存快照並重繪]
-	Start --> End[dragend：清除來源、指示線並 refresh]
+	Start --> End[dragend：清除來源、自動捲動、指示線並 refresh]
 ```
 
 manualOrder 為全 Vault 的唯一完整路徑序列；每次比較僅取目前目錄的項目，因此各目錄相對順序獨立。parsePreferences 的 paths 回呼驗證與去重 manualOrder，舊版無此欄位時使用空陣列。showSortMenu 僅在此目錄尚未保存任何順序時初始化，避免切回手動模式覆蓋歷史。
 
-bindManualDragging 只綁定當前目錄列，路徑區不綁定。dragstart 保存面板內的來源並使用 application/x-flat-explorer-order，不提供宿主搬移檔案的格式；dragover 清除舊插入線但保留來源半透明外觀；dragleave 在真正離開列後清除該列指示；drop 重驗來源與目標後保存；dragend 支援取消並補做延後的重繪。canReorder 拒絕外來路徑、不同目錄、自己、非手動模式、編輯中及跨置頂分組。moveEntry 以完整 children 保存順序，包含隱藏項目；reorderPaths 不修改輸入陣列，無效來源或目標則回傳不變的副本。clearDragIndicators(clearSource=true) 控制是否一併移除來源外觀。不呼叫 Vault 的搬移或寫入檔案 API。
+bindDesktopDragging 為所有非行動端列綁定拖放：只有當前目錄列設定 draggable，路徑區上層目錄僅作為搬移落點。dragstart 記錄 draggedPath 與 dragSource 物件身分，並使用 application/x-flat-explorer-order；sections 容器於 dragover 依上下 36px 邊緣啟動 updateDesktopAutoScroll，以便拖曳到上層路徑區或長列表遠端。桌面與觸控共用 resolveDropTarget（呼叫 getTouchDropKind 與 getMovePath）及 moveFileToFolder：所有排序模式皆可拖曳至資料夾中央或路徑區祖先目錄透過 FileManager.renameFile 搬移並更新連結，手動模式額外在一般列前後與資料夾上下四分之一顯示插入線並調整順序。drop 與 finishTouchDrag 均以原始路徑重新核對 Vault 物件身分與同名衝突，並於搬移期間設定 movingFile 避免 dragend 提前重繪；rename 事件仍同步 tabStates 與 pinned／hidden／manualOrder。clearDragIndicators(clearSource=true) 控制是否一併移除來源外觀。
 
 renderRow 的 activate 回呼區分資料夾及檔案，支援 Enter／Space、Ctrl／Cmd 與滑鼠中鍵新分頁；F2 啟動改名。列使用 nav-file／nav-folder 原生類別，標題以 ellipsis 截斷。Markdown 隱藏副檔名，其他檔案保留；資料夾無斜線，所有列沒有樹狀深度。getViewType、getDisplayText、getIcon 提供宿主中繼資料。
 
@@ -209,7 +213,7 @@ TouchFileDrag.constructor 註冊 pointerdown／doc pointermove／pointerup／poi
 
 startTouchDrag 驗證目前直屬來源，設定 draggedPath、半透明來源與 body 中的非互動預覽；其圖層使用 --layer-dragged-item。updateTouchDrag 只接受本面板的列，以 getTouchDropKind 判斷區域：手動模式資料夾中間 50% 為移入、上下各 25% 為排序；檔案以前後半部排序；非手動模式只有資料夾接受搬移。路徑區資料夾整列都是搬移目標，故可移到父層或祖先。描述文字與高亮只在通過驗證時更新 touchDrop，無效落點顯示原因。
 
-getMovePath 拒絕根目錄來源、原地、自身與來源資料夾的真正後代，保留原檔名，根目錄目的地不加斜線前綴。rowFiles 記錄每列的原始物件身分，touchSource 保存拖曳來源；預覽及放置均核對 Vault 物件身分與列的路徑，避免刪除後同路徑重建造成誤搬。finishTouchDrag 重驗所有來源與目標，排序沿用 moveEntry，搬移使用公開 FileManager.renameFile 讓宿主處理連結更新；同名既有項目不覆寫。movingFile 在實際搬移期間延後重繪與阻止新拖曳；rename 事件仍同步 pinned／hidden／manualOrder。取消、無落點及完成都會移除預覽與所有插入／移入標記。
+getMovePath 拒絕根目錄來源、原地、自身與來源資料夾的真正後代，保留原檔名，根目錄目的地不加斜線前綴。rowFiles 記錄每列的原始物件身分，dragSource 保存拖曳來源；預覽及放置均核對 Vault 物件身分與列的路徑，避免刪除後同路徑重建造成誤搬。moveFileToFolder 重驗所有來源與目標，排序沿用 moveEntry，搬移使用公開 FileManager.renameFile 讓宿主處理連結更新；同名既有項目不覆寫。movingFile 在實際搬移期間延後重繪與阻止新拖曳；rename 事件仍同步 tabStates 與 pinned／hidden／manualOrder。取消、無落點及完成都會移除預覽與所有插入／移入標記。
 
 ## 類型圖示與置頂 hover
 
@@ -314,11 +318,13 @@ parsePreferences 的 paths 回呼只保留唯一字串，無效排序回 native�
 
 [esbuild.config.mjs](esbuild.config.mjs) 頂層選擇單次 build 或 context.watch，無自訂函式；產出 CommonJS main.js，obsidian 保留為宿主依賴。
 
-[tests/explorer_preferences.test.mjs](tests/explorer_preferences.test.mjs) 使用 esbuild 記憶體產出及 vm 載入純偏好模組；require 回呼只注入 instanceof 所需的 TFile／TFolder 替身。file 函式建立含 path、name、basename、stat.mtime／ctime 的檔案替身。八個 test 回呼驗證置頂及取消、六種排序的兩個優先群組、改名刪除後代邊界、無效設定、手動混排與新項目、前後拖放及不變性、模式切換與跨目錄保存、資料夾置頂與筆記混排；sort／map 回呼比較實際輸出順序。
+[tests/explorer_preferences.test.mjs](tests/explorer_preferences.test.mjs) 使用 esbuild 記憶體產出及 vm 載入純偏好模組；require 回呼只注入 instanceof 所需的 TFile／TFolder 替身。file 函式建立含 path、name、basename、stat.mtime／ctime 的檔案替身。九個 test 回呼驗證置頂及取消、六種排序的兩個優先群組、改名刪除後代邊界、無效設定、手動混排與新項目、前後拖放及不變性、模式切換與跨目錄保存、資料夾置頂與筆記混排，以及啟動分頁預設還原與舊設定相容；sort／map 回呼比較實際輸出順序。
 
 [tests/file_icons.test.mjs](tests/file_icons.test.mjs) 以相同載入策略測試圖示分類；normalizePath 替身僅處理測試需要的尾斜線。file 函式建立含 path／name／basename／extension 的替身，dailyHost 建立 enabled／folder／format 設定替身。三個 test 回呼驗證類型區分、有效日期與精確目錄邊界、日期子目錄及 Vault 根目錄；Moment 使用實際日期解析實作。
 
-[tests/touch_drag.test.mjs](tests/touch_drag.test.mjs) 使用相同記憶體載入方式，folder 函式建立 path／name／parent／isRoot 替身。四個 test 回呼驗證落點中央與邊緣、非手動模式、子層／父層／根目錄路徑，以及自身與子孫保護和同名前綴邊界。
+[tests/touch_drag.test.mjs](tests/touch_drag.test.mjs) 使用相同記憶體載入方式，folder 函式建立 path／name／parent／isRoot 替身。五個 test 回呼驗證落點中央與邊緣、非手動模式、子層／父層／根目錄路徑、自身與子孫保護和同名前綴邊界，以及路徑區上層資料夾在所有高度比例下皆接受搬移。
+
+[tests/tab_state.test.mjs](tests/tab_state.test.mjs) 使用相同記憶體載入方式測試分頁狀態模組，五個 test 回呼驗證預設同時還原目前與背景分頁、停用時僅略過目前分頁、無開啟編輯分頁時的預設鍵、保留就緒前操作與無效儲存容錯，以及改名／搬移／刪除後的路徑同步。
 
 本機 .qa 為忽略版本控制的實機驗證暫存區。0.2.0 已通過 15 項 Obsidian 1.14.5 檢查：核心與第三方選單保留、不重複顯示控制、置頂順序及圖示、設定保存、Hide／Unhide、原生 hover-link、改名啟動與 Escape 取消、資料夾無斜線。測試前後還原偏好，不改名或刪除使用者筆記。實際視覺已由原生面板與選單截圖檢查；行動版與舊版本尚未實測。
 
@@ -338,7 +344,7 @@ parsePreferences 的 paths 回呼只保留唯一字串，無效排序回 native�
 | --- | --- |
 | package.json | name／version／description 識別套件；author 為 MiuDog；repository.type／url 指向 GitHub Git 儲存庫；private 防止 npm 意外發佈；main 指定產物；type 指定工具 ESM；scripts.dev 監看、build 型別檢查與建置、test 執行 Node 測試；devDependencies 為 esbuild／obsidian／typescript。 |
 | manifest.json | id 安裝目錄與識別；name 顯示名稱；version 發行版；minAppVersion 為套件最低目標，完整內部 API 僅確認 1.14.5；description 用途；author 為 MiuDog，authorUrl 為作者 GitHub；isDesktopOnly=false 支援行動載入，已模擬驗證，實機待驗證。 |
-| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0、0.7.0 與 0.7.1 對應 1.5.0，與 manifest 契約一致。 |
+| versions.json | 版本字串為鍵，最低 Obsidian 版本為值；0.6.0 至 0.9.0 對應 1.5.0，與 manifest 契約一致。 |
 | tsconfig.json | compilerOptions.target／module／moduleResolution 編譯環境；lib ES／DOM 型別；strict／noImplicitReturns／noUncheckedIndexedAccess 檢查；isolatedModules 配合 esbuild；skipLibCheck 跳過依賴；include 限定 src。 |
 | esbuild options | entryPoints 入口；bundle 合併；external 排除宿主；format／target 產物格式；outfile 檔名；sourcemap 開發啟用。 |
 

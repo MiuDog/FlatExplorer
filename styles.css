@@ -70,7 +70,7 @@
 	outline-offset: -2px;
 }
 
-.flat-explorer-row[draggable="true"] {
+.flat-explorer-contents.flat-explorer-manual .flat-explorer-row[draggable="true"] {
 	cursor: grab;
 }
 

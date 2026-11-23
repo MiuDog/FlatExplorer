@@ -1,20 +1,11 @@
 import { Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
 import { FlatExplorerView, VIEW_TYPE } from "./FlatExplorerView";
 import { ExplorerPreferences, parsePreferences, remapPaths } from "./explorer_preferences";
+import { ExplorerTabState, FALLBACK_TAB_ID, remapTabStateMap, restoreTabStates } from "./tab_state";
+
+export type { ExplorerTabState };
 
 const TAB_STORAGE_KEY = "flat-explorer-tab-states";
-
-/*
-ExplorerTabState：每個編輯區分頁獨立的瀏覽狀態。
-
-folderPath: string，目前資料夾的 Vault 路徑。
-showHidden: boolean，是否暫時顯示此分頁的隱藏項目。
-
-*/
-export interface ExplorerTabState {
-	folderPath: string;
-	showHidden: boolean;
-}
 
 /*
 FlatExplorerPlugin：管理面板及可持久化顯示偏好，繼承 Plugin 的 app、儲存與生命週期。
@@ -23,6 +14,7 @@ preferences: ExplorerPreferences，當前 Vault 的置頂、隱藏與排序。
 saveQueue: Promise<void>，序列化儲存，防止快速連點造成舊資料覆蓋新資料。
 tabStates: Map<string, ExplorerTabState>，以宿主版面持久化的分頁識別區分瀏覽狀態。
 tabStatesReady: boolean，是否已完成本次啟動的還原決策。
+pendingTabPersist: boolean，版面就緒前若有異動，於初始化後補存本機儲存。
 activeExplorerTab()：無輸入；WorkspaceLeaf | null，取得最近使用的編輯區分頁。
 tabState()：無輸入；ExplorerTabState | undefined，取得當前分頁狀態。
 rememberTabState(state: ExplorerTabState，瀏覽狀態；leaf: WorkspaceLeaf | null，目標分頁)：void，寫入此裝置 Vault 的分頁狀態。
@@ -40,8 +32,9 @@ export default class FlatExplorerPlugin extends Plugin {
 
 	preferences: ExplorerPreferences = parsePreferences(null);
 	private saveQueue: Promise<void> = Promise.resolve();
-	private readonly tabStates = new Map<string, ExplorerTabState>();
+	private tabStates = new Map<string, ExplorerTabState>();
 	private tabStatesReady = false;
+	private pendingTabPersist = false;
 
 	async onload(): Promise<void> {
 		// 步驟 1：先還原顯示偏好，避免重啟時暫時顯示已隱藏項目。
@@ -97,60 +90,55 @@ export default class FlatExplorerPlugin extends Plugin {
 	}
 
 	tabState(): ExplorerTabState | undefined {
-		return this.tabStates.get(tabId(this.activeExplorerTab()) ?? "");
+		return this.tabStates.get(tabId(this.activeExplorerTab()) ?? FALLBACK_TAB_ID);
 	}
 
 	rememberTabState(state: ExplorerTabState, leaf = this.activeExplorerTab()): void {
-		const id = tabId(leaf);
-		if (!id || !this.tabStatesReady)
-			return;
-
+		const id = tabId(leaf) ?? FALLBACK_TAB_ID;
 		this.tabStates.set(id, state);
-		this.persistTabStates();
+		if (this.tabStatesReady)
+			this.persistTabStates();
+		else
+			this.pendingTabPersist = true;
 	}
 
 	private initializeTabStates(): void {
 		if (this.tabStatesReady)
 			return;
 
-		// 只讀取仍存在於此裝置版面的分頁，不依賴檔名識別。
-		const saved: unknown = this.app.loadLocalStorage(TAB_STORAGE_KEY);
-		const activeId = tabId(this.activeExplorerTab());
-		if (saved && typeof saved === "object") {
-			this.app.workspace.iterateAllLeaves((leaf) => {
-				const id = tabId(leaf);
-				if (!id || id === activeId && !this.preferences.restoreTabOnStartup)
-					return;
+		// 只讀取仍存在於此裝置版面的分頁與預設鍵，不依賴檔名識別。
+		const saved: unknown = typeof this.app.loadLocalStorage === "function" ? this.app.loadLocalStorage(TAB_STORAGE_KEY) : null;
+		const leafIds: string[] = [];
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			const id = tabId(leaf);
+			if (id)
+				leafIds.push(id);
+		});
 
-				const entry = (saved as Record<string, Partial<ExplorerTabState> | null>)[id];
-				if (typeof entry?.folderPath === "string")
-					this.tabStates.set(id, { folderPath: entry.folderPath, showHidden: entry.showHidden === true });
-			});
-		}
-
+		this.tabStates = restoreTabStates(saved, leafIds, tabId(this.activeExplorerTab()), this.preferences.resetTabOnStartup, this.tabStates);
 		this.tabStatesReady = true;
+		if (this.pendingTabPersist) {
+			this.pendingTabPersist = false;
+			this.persistTabStates();
+		}
 	}
 
 	private persistTabStates(): void {
 		// 分頁識別隸屬本機工作區，與跨裝置同步的套件設定分開保存。
-		this.app.saveLocalStorage(TAB_STORAGE_KEY, Object.fromEntries(this.tabStates));
+		if (typeof this.app.saveLocalStorage === "function")
+			this.app.saveLocalStorage(TAB_STORAGE_KEY, Object.fromEntries(this.tabStates));
 	}
 
 	private remapTabStates(oldPath: string, newPath: string | null): void {
-		let changed = false;
-		for (const [id, state] of this.tabStates) {
-			const [folderPath] = remapPaths([state.folderPath], oldPath, newPath);
-			if (folderPath !== state.folderPath) {
-				changed = true;
-				if (folderPath === undefined)
-					this.tabStates.delete(id);
-				else
-					this.tabStates.set(id, { ...state, folderPath });
-			}
-		}
+		const { states, changed } = remapTabStateMap(this.tabStates, oldPath, newPath);
+		if (!changed)
+			return;
 
-		if (changed)
+		this.tabStates = states;
+		if (this.tabStatesReady)
 			this.persistTabStates();
+		else
+			this.pendingTabPersist = true;
 	}
 
 	async activateView(): Promise<void> {
@@ -196,9 +184,9 @@ class FlatExplorerSettings extends PluginSettingTab {
 		this.containerEl.empty();
 		new Setting(this.containerEl)
 			.setName("啟動時還原當前分頁")
-			.setDesc("重新開啟 Obsidian 時，還原當前分頁的 FlatExplorer 目錄。關閉此選項時從根目錄開始。")
-			.addToggle((toggle) => toggle.setValue(this.plugin.preferences.restoreTabOnStartup).onChange((value) => {
-				this.plugin.preferences.restoreTabOnStartup = value;
+			.setDesc("重新開啟 Obsidian 時，還原當前分頁的 FlatExplorer 目錄與顯示狀態。預設開啟；關閉此選項時從根目錄開始。")
+			.addToggle((toggle) => toggle.setValue(!this.plugin.preferences.resetTabOnStartup).onChange((value) => {
+				this.plugin.preferences.resetTabOnStartup = !value;
 				this.plugin.savePreferences();
 			}));
 	}

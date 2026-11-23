@@ -112,3 +112,9 @@ test("資料夾置頂先於一般項目，手動模式可與置頂筆記混排",
 	preferences.sortOrder = "alphabetical";
 	assert.deepEqual([...items].sort((a, b) => compareEntries(a, b, preferences)).map((item) => item.path), ["AFolder", "ZFolder", "A.md", "Pinned.md"]);
 });
+
+test("啟動分頁預設還原，舊版設定不覆寫預設且可明確停用", () => {
+	assert.equal(parsePreferences(null).resetTabOnStartup, false);
+	assert.equal(parsePreferences({ restoreTabOnStartup: false }).resetTabOnStartup, false);
+	assert.equal(parsePreferences({ resetTabOnStartup: true }).resetTabOnStartup, true);
+});
